@@ -13,10 +13,11 @@
 // AddShape 还是 payload 序列化示例之一（toPayload/fromPayload +
 // CommandFactory 注册见 main.cpp）。
 // ════════════════════════════════════════════════════════════════════════
-#include <QJsonObject>
 #include <QList>
 #include <QVector>
+#include <cstdint>
 #include <memory>
+#include <string>
 #include "canvas/ShapeMeta.h"
 #include "commands/CommandIds.h"
 #include "core/Command.h"
@@ -34,14 +35,15 @@ public:
     void redo() override;
     void undo() override;
     int  id() const override { return kCdAddShape; }
-    QString text() const override;
-    qint64 estimatedMemory() const override;
+    std::string text() const override;
+    int64_t estimatedMemory() const override;
     ur::ContextSet contexts() const override;
 
-    QString payloadType() const override { return QStringLiteral("cd.addshape"); }
-    QJsonObject toPayload() const override;
+    std::string payloadType() const override { return "cd.addshape"; }
+    std::string toPayload() const override;         // JSON 文本（demo 层格式知识）
+    // data 解析失败返回 nullptr（Creator 契约）
     static std::unique_ptr<AddShapeCommand> fromPayload(CanvasScene* scene,
-                                                        const QJsonObject& data);
+                                                        const std::string& data);
 
     ShapeId shapeId() const { return id_; }
 
@@ -59,8 +61,8 @@ public:
     void redo() override;               // 首次执行捕获快照，其后按快照删除
     void undo() override;               // 按快照 + 原 id 重建
     int  id() const override { return kCdRemoveShape; }
-    QString text() const override;
-    qint64 estimatedMemory() const override;
+    std::string text() const override;
+    int64_t estimatedMemory() const override;
     ur::ContextSet contexts() const override;
 
 private:

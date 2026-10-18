@@ -8,8 +8,8 @@
 // ════════════════════════════════════════════════════════════════════════
 
 #include <QList>
-#include <QString>
 #include <algorithm>
+#include <string>
 #include "canvas/ShapeMeta.h"
 
 namespace cd {
@@ -25,18 +25,21 @@ enum CdCommandId : int {
     kCdSetGroup    = 107,
 };
 
-// mergeTag 工具：目标 id 集合 → 确定性字符串。
+// mergeTag 工具：目标 id 集合 → 确定性字符串（core 的 mergeTag 是
+// std::string，这里纯数字拼接不需要 Qt）。
 // tag 相同 = "同一批目标的同一段连续操作"，是合并的必要条件；
 // 选中集合一变 tag 就变 → 合并被阻断（极性/换目标防线，设计精讲 §7）。
-inline QString idsTag(const QList<ShapeId>& ids)
+inline std::string idsTag(const QList<ShapeId>& ids)
 {
     QList<ShapeId> sorted = ids;
     std::sort(sorted.begin(), sorted.end());
-    QStringList parts;
-    parts.reserve(sorted.size());
-    for (ShapeId id : sorted)
-        parts << QString::number(id);
-    return parts.join(QLatin1Char(':'));
+    std::string out;
+    for (ShapeId id : sorted) {
+        if (!out.empty())
+            out += ':';
+        out += std::to_string(id);
+    }
+    return out;
 }
 
 } // namespace cd

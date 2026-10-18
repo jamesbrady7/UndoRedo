@@ -13,6 +13,8 @@
 // ════════════════════════════════════════════════════════════════════════
 #include <QHash>
 #include <QList>
+#include <cstdint>
+#include <string>
 #include "canvas/ShapeMeta.h"
 #include "commands/CommandIds.h"
 #include "core/Command.h"
@@ -29,8 +31,8 @@ public:
     void redo() override;
     void undo() override;
     int  id() const override { return kCdReorderZ; }
-    QString text() const override;
-    qint64 estimatedMemory() const override;
+    std::string text() const override;
+    int64_t estimatedMemory() const override;
     ur::ContextSet contexts() const override;
 
 private:
@@ -52,8 +54,8 @@ public:
     void redo() override;
     void undo() override;
     int  id() const override { return kCdSetGroup; }
-    QString text() const override;
-    qint64 estimatedMemory() const override;
+    std::string text() const override;
+    int64_t estimatedMemory() const override;
     ur::ContextSet contexts() const override;
 
 private:

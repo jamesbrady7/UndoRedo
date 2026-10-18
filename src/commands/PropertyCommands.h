@@ -12,9 +12,10 @@
 // ════════════════════════════════════════════════════════════════════════
 #include <QColor>
 #include <QHash>
-#include <QJsonObject>
 #include <QList>
+#include <cstdint>
 #include <memory>
+#include <string>
 #include "canvas/ShapeMeta.h"
 #include "commands/CommandIds.h"
 #include "core/Command.h"
@@ -32,14 +33,14 @@ public:
     void redo() override;
     void undo() override;
     int  id() const override { return kCdSetFill; }
-    QString text() const override;
-    QString mergeTag() const override;
+    std::string text() const override;
+    std::string mergeTag() const override;
     bool mergeWith(const ur::Command* next) override;
-    qint64 estimatedMemory() const override;
+    int64_t estimatedMemory() const override;
     ur::ContextSet contexts() const override;
 
-    QString payloadType() const override { return QStringLiteral("cd.setfill"); }
-    QJsonObject toPayload() const override;
+    std::string payloadType() const override { return "cd.setfill"; }
+    std::string toPayload() const override;     // JSON 文本（demo 层格式知识）
 
 private:
     void apply(const QColor& c);
@@ -60,10 +61,10 @@ public:
     void redo() override;
     void undo() override;
     int  id() const override { return kCdSetStroke; }
-    QString text() const override;
-    QString mergeTag() const override;
+    std::string text() const override;
+    std::string mergeTag() const override;
     bool mergeWith(const ur::Command* next) override;
-    qint64 estimatedMemory() const override;
+    int64_t estimatedMemory() const override;
     ur::ContextSet contexts() const override;
 
 private:

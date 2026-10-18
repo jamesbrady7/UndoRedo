@@ -1,6 +1,8 @@
 #include "commands/PropertyCommands.h"
 
 #include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include "canvas/CanvasScene.h"
 #include "core/Context.h"
 
@@ -44,15 +46,15 @@ void SetFillCommand::applyMap(const QHash<ShapeId, QColor>& map)
 void SetFillCommand::redo() { apply(to_); }
 void SetFillCommand::undo() { applyMap(from_); }
 
-QString SetFillCommand::text() const
+std::string SetFillCommand::text() const
 {
-    return ids_.size() == 1 ? QStringLiteral("修改填充色")
-                            : QStringLiteral("修改 %1 个图形的填充色").arg(ids_.size());
+    return ids_.size() == 1 ? std::string("修改填充色")
+                            : QStringLiteral("修改 %1 个图形的填充色").arg(ids_.size()).toStdString();
 }
 
-QString SetFillCommand::mergeTag() const
+std::string SetFillCommand::mergeTag() const
 {
-    return QStringLiteral("fill:%1").arg(idsTag(ids_));   // 换目标即阻断
+    return "fill:" + idsTag(ids_);              // 换目标即阻断
 }
 
 bool SetFillCommand::mergeWith(const ur::Command* next)
@@ -64,9 +66,9 @@ bool SetFillCommand::mergeWith(const ur::Command* next)
     return true;
 }
 
-qint64 SetFillCommand::estimatedMemory() const
+int64_t SetFillCommand::estimatedMemory() const
 {
-    return qint64(sizeof(*this)) + qint64(ids_.size() + from_.size()) * 16;
+    return int64_t(sizeof(*this)) + int64_t(ids_.size() + from_.size()) * 16;
 }
 
 ur::ContextSet SetFillCommand::contexts() const
@@ -74,7 +76,7 @@ ur::ContextSet SetFillCommand::contexts() const
     return {ur::kCtxInspector};             // 属性通道（context 过滤演示主角）
 }
 
-QJsonObject SetFillCommand::toPayload() const
+std::string SetFillCommand::toPayload() const
 {
     QJsonObject o;
     QJsonArray arr;
@@ -82,7 +84,7 @@ QJsonObject SetFillCommand::toPayload() const
         arr.append(double(id));
     o.insert(QStringLiteral("ids"), arr);
     o.insert(QStringLiteral("to"), to_.name());
-    return o;
+    return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)).toStdString();
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -123,15 +125,15 @@ void SetStrokeWidthCommand::applyMap(const QHash<ShapeId, qreal>& map)
 void SetStrokeWidthCommand::redo() { apply(to_); }
 void SetStrokeWidthCommand::undo() { applyMap(from_); }
 
-QString SetStrokeWidthCommand::text() const
+std::string SetStrokeWidthCommand::text() const
 {
-    return ids_.size() == 1 ? QStringLiteral("修改描边宽度")
-                            : QStringLiteral("修改 %1 个图形的描边宽度").arg(ids_.size());
+    return ids_.size() == 1 ? std::string("修改描边宽度")
+                            : QStringLiteral("修改 %1 个图形的描边宽度").arg(ids_.size()).toStdString();
 }
 
-QString SetStrokeWidthCommand::mergeTag() const
+std::string SetStrokeWidthCommand::mergeTag() const
 {
-    return QStringLiteral("stroke:%1").arg(idsTag(ids_));
+    return "stroke:" + idsTag(ids_);
 }
 
 bool SetStrokeWidthCommand::mergeWith(const ur::Command* next)
@@ -143,9 +145,9 @@ bool SetStrokeWidthCommand::mergeWith(const ur::Command* next)
     return true;
 }
 
-qint64 SetStrokeWidthCommand::estimatedMemory() const
+int64_t SetStrokeWidthCommand::estimatedMemory() const
 {
-    return qint64(sizeof(*this)) + qint64(ids_.size() + from_.size()) * 16;
+    return int64_t(sizeof(*this)) + int64_t(ids_.size() + from_.size()) * 16;
 }
 
 ur::ContextSet SetStrokeWidthCommand::contexts() const

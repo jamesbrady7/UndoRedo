@@ -14,6 +14,8 @@
 #include <QHash>
 #include <QPointF>
 #include <QRectF>
+#include <cstdint>
+#include <string>
 #include "canvas/ShapeMeta.h"
 #include "commands/CommandIds.h"
 #include "core/Command.h"
@@ -28,15 +30,15 @@ public:
     // gestureId：同一次按下-拖拽-松开为一个手势号；<=0 表示非手势（对齐等）
     MoveShapesCommand(CanvasScene* scene,
                       QHash<ShapeId, QPointF> from, QHash<ShapeId, QPointF> to,
-                      qint64 gestureId = 0);
+                      int64_t gestureId = 0);
 
     void redo() override;
     void undo() override;
     int  id() const override { return kCdMove; }
-    QString text() const override;
-    QString mergeTag() const override;
+    std::string text() const override;
+    std::string mergeTag() const override;
     bool mergeWith(const ur::Command* next) override;
-    qint64 estimatedMemory() const override;
+    int64_t estimatedMemory() const override;
     ur::ContextSet contexts() const override;
 
 private:
@@ -44,22 +46,22 @@ private:
 
     CanvasScene* scene_;
     QHash<ShapeId, QPointF> from_, to_;
-    qint64 gestureId_;
+    int64_t gestureId_;
 };
 
 class ResizeShapeCommand : public ur::Command
 {
 public:
     ResizeShapeCommand(CanvasScene* scene, ShapeId id,
-                       QRectF from, QRectF to, qint64 gestureId = 0);
+                       QRectF from, QRectF to, int64_t gestureId = 0);
 
     void redo() override;
     void undo() override;
     int  id() const override { return kCdResize; }
-    QString text() const override;
-    QString mergeTag() const override;
+    std::string text() const override;
+    std::string mergeTag() const override;
     bool mergeWith(const ur::Command* next) override;
-    qint64 estimatedMemory() const override;
+    int64_t estimatedMemory() const override;
     ur::ContextSet contexts() const override;
 
 private:
@@ -68,7 +70,7 @@ private:
     CanvasScene* scene_;
     ShapeId id_;
     QRectF from_, to_;
-    qint64 gestureId_;
+    int64_t gestureId_;
 };
 
 } // namespace cd

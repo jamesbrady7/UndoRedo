@@ -14,7 +14,7 @@ class QListWidget;
 class QPushButton;
 class QLabel;
 
-namespace ur { class CommandStack; }
+namespace ur { class CommandStack; class StackBridge; }
 
 namespace cd {
 
@@ -22,7 +22,10 @@ class HistoryDock : public QWidget
 {
     Q_OBJECT
 public:
-    explicit HistoryDock(ur::CommandStack* stack, QWidget* parent = nullptr);
+    // stack=命令 API（setIndex/undoIn/history），bridge=Qt 信号源（core 零 Qt，
+    // 刷新触发从桥上来）——两者都不持有，生命周期由 MainWindow 保证
+    explicit HistoryDock(ur::CommandStack* stack, ur::StackBridge* bridge,
+                         QWidget* parent = nullptr);
 
 public slots:
     void refresh();                     // indexChanged → 整表重建（demo 规模够用）

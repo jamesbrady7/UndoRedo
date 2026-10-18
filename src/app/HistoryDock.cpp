@@ -5,12 +5,13 @@
 #include <QListWidget>
 #include <QPushButton>
 #include <QVBoxLayout>
+#include "app/StackBridge.h"
 #include "core/CommandStack.h"
 #include "core/Context.h"
 
 namespace cd {
 
-HistoryDock::HistoryDock(ur::CommandStack* stack, QWidget* parent)
+HistoryDock::HistoryDock(ur::CommandStack* stack, ur::StackBridge* bridge, QWidget* parent)
     : QWidget(parent)
     , stack_(stack)
 {
@@ -39,9 +40,11 @@ HistoryDock::HistoryDock(ur::CommandStack* stack, QWidget* parent)
     root->addWidget(undoInsp_);
     root->addWidget(undoCanvas_);
 
-    if (stack_) {
-        connect(stack_, &ur::CommandStack::indexChanged, this, [this](int) { refresh(); });
-        connect(stack_, &ur::CommandStack::cleanChanged, this, [this](bool) { refresh(); });
+    // 刷新触发接 StackBridge 的 Qt 信号（core 的 Observer 回调已被桥重发）；
+    // bridge 先于本 dock 析构时 QObject 自动断连，无悬垂信号
+    if (bridge) {
+        connect(bridge, &ur::StackBridge::indexChanged, this, [this](int) { refresh(); });
+        connect(bridge, &ur::StackBridge::cleanChanged, this, [this](bool) { refresh(); });
     }
     refresh();
 }
@@ -57,26 +60,26 @@ void HistoryDock::refresh()
     auto* zero = new QListWidgetItem(QStringLiteral("(初始状态)"), list_);
     zero->setForeground(QColor(0x88, 0x88, 0x88));
 
-    const QVector<ur::CommandStack::Entry> h = stack_->history();
-    for (int j = 0; j < h.size(); ++j) {
-        const ur::CommandStack::Entry& e = h[j];
+    const std::vector<ur::CommandStack::Entry> h = stack_->history();
+    for (int j = 0; j < int(h.size()); ++j) {
+        const ur::CommandStack::Entry& e = h[size_t(j)];
         QStringList ctxs;
-        for (const QString& c : e.contexts)
-            ctxs << c;
+        for (const std::string& c : e.contexts)
+            ctxs << QString::fromStdString(c);   // 边界纪律：fromStdString 上 UI
         ctxs.sort();
-        const QString time = QDateTime::fromMSecsSinceEpoch(e.timestampMs)
+        const QString time = QDateTime::fromMSecsSinceEpoch(qint64(e.timestampMs))
                                  .toString(QStringLiteral("HH:mm:ss"));
         QString line = QStringLiteral("#%1  %2   [%3]  %4B")
                            .arg(j + 1)
-                           .arg(e.text, ctxs.join(QLatin1Char('+')))
-                           .arg(e.bytes)
+                           .arg(QString::fromStdString(e.text), ctxs.join(QLatin1Char('+')))
+                           .arg(qint64(e.bytes))
                            .arg(time);
         if (e.merged)
             line += QStringLiteral("  <merged>");
         auto* item = new QListWidgetItem(line, list_);
-        if (e.contexts.contains(ur::kCtxInspector))
+        if (ur::containsCtx(e.contexts, ur::kCtxInspector))
             item->setForeground(QColor(0x9b, 0x59, 0xb6));   // 属性通道紫色
-        else if (e.contexts.contains(ur::kCtxCanvas))
+        else if (ur::containsCtx(e.contexts, ur::kCtxCanvas))
             item->setForeground(QColor(0x2c, 0x6e, 0xb3));   // 画布通道蓝色
     }
 
@@ -92,7 +95,7 @@ void HistoryDock::refresh()
     stats_->setText(QStringLiteral("游标 %1 / %2 条 · 内存 %3 B · %4")
                         .arg(stack_->index())
                         .arg(stack_->count())
-                        .arg(stack_->totalBytes())
+                        .arg(qint64(stack_->totalBytes()))
                         .arg(stack_->isClean() ? QStringLiteral("已保存")
                                                : QStringLiteral("未保存")));
     undoInsp_->setEnabled(stack_->canUndoIn({ur::kCtxInspector}));

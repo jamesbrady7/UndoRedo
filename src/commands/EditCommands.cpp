@@ -1,5 +1,7 @@
 #include "commands/EditCommands.h"
 
+#include <QJsonDocument>
+#include <QJsonObject>
 #include "canvas/CanvasScene.h"
 #include "core/Context.h"
 
@@ -34,14 +36,15 @@ void AddShapeCommand::undo()
         scene_->removeShape(id_);               // 已不在 → scene 内 no-op
 }
 
-QString AddShapeCommand::text() const
+std::string AddShapeCommand::text() const
 {
-    return QStringLiteral("添加%1").arg(shapeKindName(meta_.kind));
+    // 边界纪律：中文格式化在 demo 层用 QString 完成，出口统一 toStdString
+    return QStringLiteral("添加%1").arg(shapeKindName(meta_.kind)).toStdString();
 }
 
-qint64 AddShapeCommand::estimatedMemory() const
+int64_t AddShapeCommand::estimatedMemory() const
 {
-    return qint64(sizeof(*this)) + 128;         // meta 字符串/颜色的粗略摊销
+    return int64_t(sizeof(*this)) + 128;        // meta 字符串/颜色的粗略摊销
 }
 
 ur::ContextSet AddShapeCommand::contexts() const
@@ -49,18 +52,25 @@ ur::ContextSet AddShapeCommand::contexts() const
     return {ur::kCtxCanvas};
 }
 
-QJsonObject AddShapeCommand::toPayload() const
+// payload 对 core 是不透明文本；"装 JSON"是 demo 层的格式知识——
+// 组装用 QJsonObject（复用 ShapeMeta::toJson），出口 Compact 序列化。
+std::string AddShapeCommand::toPayload() const
 {
     QJsonObject o = meta_.toJson();
     o.insert(QStringLiteral("id"), double(id_));
-    return o;
+    return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)).toStdString();
 }
 
 std::unique_ptr<AddShapeCommand> AddShapeCommand::fromPayload(CanvasScene* scene,
-                                                              const QJsonObject& data)
+                                                              const std::string& data)
 {
-    ShapeMeta m = ShapeMeta::fromJson(data);
-    const ShapeId id = ShapeId(data.value(QStringLiteral("id")).toDouble(0.0));
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(data), &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject())
+        return nullptr;                         // 解析失败 → nullptr（Creator 契约）
+    const QJsonObject obj = doc.object();
+    ShapeMeta m = ShapeMeta::fromJson(obj);
+    const ShapeId id = ShapeId(obj.value(QStringLiteral("id")).toDouble(0.0));
     return std::make_unique<AddShapeCommand>(scene, m, id);
 }
 
@@ -102,16 +112,16 @@ void RemoveShapesCommand::undo()
     scene_->selectIds(restored);                // 恢复后自然选中
 }
 
-QString RemoveShapesCommand::text() const
+std::string RemoveShapesCommand::text() const
 {
-    const int n = qMax(1, int(saved_.size()));
-    return n == 1 ? QStringLiteral("删除图形")
-                  : QStringLiteral("删除 %1 个图形").arg(n);
+    const int n = (std::max)(1, int(saved_.size()));
+    return n == 1 ? std::string("删除图形")
+                  : QStringLiteral("删除 %1 个图形").arg(n).toStdString();
 }
 
-qint64 RemoveShapesCommand::estimatedMemory() const
+int64_t RemoveShapesCommand::estimatedMemory() const
 {
-    return qint64(sizeof(*this)) + qint64(qMax(1, int(saved_.size()))) * 128;
+    return int64_t(sizeof(*this)) + int64_t((std::max)(1, int(saved_.size()))) * 128;
 }
 
 ur::ContextSet RemoveShapesCommand::contexts() const

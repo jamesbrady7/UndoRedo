@@ -6,9 +6,12 @@
 #include <QJsonObject>
 #include <QPointF>
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "app/MainWindow.h"
 #include "canvas/CanvasScene.h"
@@ -35,16 +38,17 @@ void checkOk(bool cond, const char* what)
         ++g_fail;
     }
 }
-qint64 g_fakeNow = 1000000;
-qint64 fakeClock() { return g_fakeNow; }
+int64_t g_fakeNow = 1000000;
+int64_t fakeClock() { return g_fakeNow; }
 } // namespace
 
 namespace cd {
 
 void registerDemoPayloads(CanvasScene* scene)
 {
-    ur::CommandFactory::instance().registerType(QStringLiteral("cd.addshape"),
-        [scene](const QJsonObject& data) {
+    // creator 收不透明 payload 文本（core 侧约定）；JSON 解析在 demo 层完成
+    ur::CommandFactory::instance().registerType("cd.addshape",
+        [scene](const std::string& data) {
             return AddShapeCommand::fromPayload(scene, data);
         });
 }
@@ -176,7 +180,7 @@ int runCanvasSelfTest()
     const int cntS5 = stack->count();
     const int shapesS5 = scene->shapeCount();
     try {
-        ur::TransactionScope tx(stack, QStringLiteral("会中止的操作"));
+        ur::TransactionScope tx(stack, "会中止的操作");
         ShapeMeta ghost;
         ghost.name = QStringLiteral("幽灵");
         ghost.pos = QPointF(-300, -300);
@@ -218,11 +222,11 @@ int runCanvasSelfTest()
     // ── S7 历史遍历 + setIndex 任意跳转 ──
     printf("== S7 history() 遍历 + setIndex 跳转 ==\n");
     {
-        const QVector<ur::CommandStack::Entry> h = stack->history();
-        checkOk(h.size() == stack->count(), "history() 与栈等长");
-        bool entriesSane = !h.isEmpty();
+        const std::vector<ur::CommandStack::Entry> h = stack->history();
+        checkOk(int(h.size()) == stack->count(), "history() 与栈等长");
+        bool entriesSane = !h.empty();
         for (const auto& e : h)
-            entriesSane = entriesSane && !e.text.isEmpty() && e.bytes > 0;
+            entriesSane = entriesSane && !e.text.empty() && e.bytes > 0;
         checkOk(entriesSane, "每条 Entry 有文本/字节(面板与预算的数据源)");
         const int full = stack->count();
         stack->setIndex(0);
@@ -270,11 +274,25 @@ int runCanvasSelfTest()
         m.fill = QColor(0x33, 0xaa, 0x66);
         m.z = scene->nextTopZ();
         AddShapeCommand original(scene, m);
-        const QJsonObject doc = ur::CommandFactory::toPayloadDoc(original);
+        const ur::Payload doc = ur::CommandFactory::toPayloadDoc(original);
+        checkOk(doc.type == "cd.addshape" && !doc.data.empty(), "toPayloadDoc 产出 {type,data}");
+        // 外层文档 {"type":…,"data":{…}} 的拼装是【demo 层】的格式知识（core 不认识
+        // JSON）。⚠ data 是内嵌 JSON 文本：必须先解回对象再塞进外层——当字符串
+        // 直接塞会被双重转义，读回时 fromJson 拿到的是 string 不是 object。
+        QJsonObject envelope;
+        envelope.insert(QStringLiteral("type"), QString::fromStdString(doc.type));
+        envelope.insert(QStringLiteral("data"),
+                        QJsonDocument::fromJson(QByteArray::fromStdString(doc.data)).object());
         // JSON 文本往返（模拟落盘/网络）
-        const QByteArray json = QJsonDocument(doc).toJson(QJsonDocument::Compact);
+        const QByteArray json = QJsonDocument(envelope).toJson(QJsonDocument::Compact);
+        // 拆回 Payload → 工厂重建（type 查注册表，data 原样透传给 creator）
         const QJsonObject reparsed = QJsonDocument::fromJson(json).object();
-        auto rebuilt = ur::CommandFactory::instance().fromPayload(reparsed);
+        const ur::Payload wire{
+            reparsed.value(QStringLiteral("type")).toString().toStdString(),
+            QString::fromUtf8(QJsonDocument(reparsed.value(QStringLiteral("data")).toObject())
+                                  .toJson(QJsonDocument::Compact)).toStdString()
+        };
+        auto rebuilt = ur::CommandFactory::instance().fromPayload(wire);
         checkOk(rebuilt != nullptr, "工厂按类型名重建 AddShapeCommand");
         const int cntBefore = stack->count();
         stack->push(std::move(rebuilt));

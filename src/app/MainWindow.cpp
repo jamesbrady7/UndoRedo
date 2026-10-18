@@ -10,6 +10,7 @@
 #include <algorithm>
 #include "app/HistoryDock.h"
 #include "app/InspectorPanel.h"
+#include "app/StackBridge.h"
 #include "canvas/CanvasScene.h"
 #include "canvas/CanvasView.h"
 #include "commands/EditCommands.h"
@@ -33,12 +34,19 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
     setWindowTitle(QStringLiteral("UndoRedoDemo —— 自研撤销/重做框架 · 画布编辑器"));
-    stack_ = new ur::CommandStack(this);    // 先建栈，UI 装配时面板直接拿到真栈
+    // 构造顺序 stack_ → bridge_ → buildUi()：面板装配时要拿到已存在的桥。
+    // 析构顺序由成员声明序保证（见 MainWindow.h 的 ★ 注释）。
+    stack_ = std::make_unique<ur::CommandStack>();
+    bridge_ = std::make_unique<ur::StackBridge>(stack_.get());  // 故意不挂 parent
     buildUi();
     wireStack();
     onCleanChanged(true);
     resize(1280, 800);
 }
+
+// 定义处 StackBridge/CommandStack 均完整（本文件已 include）——unique_ptr
+// 的 delete 在这里实例化。析构顺序 = 成员声明逆序：bridge_ 先于 stack_。
+MainWindow::~MainWindow() = default;
 
 // ── UI 装配 ─────────────────────────────────────────────────────────────
 void MainWindow::buildUi()
@@ -100,8 +108,8 @@ void MainWindow::buildUi()
     redoAct_->setEnabled(false);
 
     // 右侧 dock：属性面板 + 历史面板（tab 化；面板是 QWidget，需包 QDockWidget）
-    inspector_ = new InspectorPanel(scene_, stack_, this);
-    historyDock_ = new HistoryDock(stack_, this);
+    inspector_ = new InspectorPanel(scene_, stack_.get(), this);
+    historyDock_ = new HistoryDock(stack_.get(), bridge_.get(), this);
     auto* inspDock = new QDockWidget(QStringLiteral("属性"), this);
     inspDock->setWidget(inspector_);
     auto* histDock = new QDockWidget(QStringLiteral("历史"), this);
@@ -124,23 +132,26 @@ void MainWindow::wireStack()
 
     // 选择集自动快照：push 前后各盖一次章，undo/redo 时由 applier 恢复
     stack_->setSelectionProvider([this] {
-        return ur::SelectionMemento::fromList(scene_->selectedIds());
+        return ur::SelectionMemento::fromSeq(scene_->selectedIds());
     });
     stack_->setSelectionApplier([this](const ur::SelectionMemento& m) {
         QList<ShapeId> ids;
-        ids.reserve(m.ids.size());
-        for (quint64 id : m.ids)
+        ids.reserve(int(m.ids.size()));
+        for (uint64_t id : m.ids)
             ids.push_back(ShapeId(id));
         scene_->selectIds(ids);
     });
 
-    // 最小信号面：indexChanged 一个信号驱动 action 文本/可用态刷新
-    connect(stack_, &ur::CommandStack::indexChanged, this, &MainWindow::onIndexChanged);
-    connect(stack_, &ur::CommandStack::cleanChanged, this, &MainWindow::onCleanChanged);
-    connect(undoAct_, &QAction::triggered, stack_, &ur::CommandStack::undo);
-    connect(redoAct_, &QAction::triggered, stack_, &ur::CommandStack::redo);
+    // 最小通知面：core 的 Observer 回调经 StackBridge 重发为 indexChanged
+    // 一个 Qt 信号，驱动 action 文本/可用态刷新
+    connect(bridge_.get(), &ur::StackBridge::indexChanged, this, &MainWindow::onIndexChanged);
+    connect(bridge_.get(), &ur::StackBridge::cleanChanged, this, &MainWindow::onCleanChanged);
+    // stack 不再是 QObject，不能当 connect 的接收者 context——用 this
+    //（返回值丢弃，同旧版把 &CommandStack::undo 当槽连接的语义）
+    connect(undoAct_, &QAction::triggered, this, [this] { stack_->undo(); });
+    connect(redoAct_, &QAction::triggered, this, [this] { stack_->redo(); });
 
-    view_->setCommandStack(stack_);
+    view_->setCommandStack(stack_.get());
     onIndexChanged(0);
 }
 
@@ -223,7 +234,7 @@ void MainWindow::alignLeft()
         if (scene_->getMeta(id, &m))
             minX = qMin(minX, m.pos.x());
     }
-    ur::TransactionScope tx(stack_, QStringLiteral("左对齐"));
+    ur::TransactionScope tx(stack_.get(), "左对齐");
     for (ShapeId id : ids) {
         ShapeMeta m;
         if (!scene_->getMeta(id, &m) || qFuzzyCompare(m.pos.x(), minX))
@@ -259,7 +270,7 @@ void MainWindow::distributeH()
     const qreal lastCx = items.last().second.pos.x() + items.last().second.size.width() / 2;
     const qreal step = (lastCx - firstCx) / qreal(items.size() - 1);
 
-    ur::TransactionScope tx(stack_, QStringLiteral("横向分布"));
+    ur::TransactionScope tx(stack_.get(), "横向分布");
     for (int i = 0; i < items.size(); ++i) {
         const ShapeId id = items[i].first;
         const ShapeMeta& m = items[i].second;
@@ -284,17 +295,18 @@ void MainWindow::onSave()
     statusBar()->showMessage(QStringLiteral("已保存（clean 检查点已记录在当前历史位置）"), 3000);
 }
 
-// ── 信号槽：最小信号面 → 全部 UI 刷新 ───────────────────────────────────
+// ── 信号槽：最小通知面 → 全部 UI 刷新 ───────────────────────────────────
 void MainWindow::onIndexChanged(int index)
 {
-    const QVector<ur::CommandStack::Entry> h = stack_->history();
+    const std::vector<ur::CommandStack::Entry> h = stack_->history();
     undoAct_->setEnabled(stack_->canUndo());
     redoAct_->setEnabled(stack_->canRedo());
-    undoAct_->setText(index > 0 && index - 1 < h.size()
-                      ? QStringLiteral("撤销 %1").arg(h[index - 1].text)
+    // Entry.text 是 UTF-8 std::string → 上 UI 统一 fromStdString（边界纪律）
+    undoAct_->setText(index > 0 && index - 1 < int(h.size())
+                      ? QStringLiteral("撤销 %1").arg(QString::fromStdString(h[size_t(index - 1)].text))
                       : QStringLiteral("撤销"));
-    redoAct_->setText(index < h.size()
-                      ? QStringLiteral("重做 %1").arg(h[index].text)
+    redoAct_->setText(index < int(h.size())
+                      ? QStringLiteral("重做 %1").arg(QString::fromStdString(h[size_t(index)].text))
                       : QStringLiteral("重做"));
 }
 

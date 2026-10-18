@@ -55,14 +55,14 @@ void ReorderZCommand::undo()
     applyZ(oldZ_);
 }
 
-QString ReorderZCommand::text() const
+std::string ReorderZCommand::text() const
 {
-    return toFront_ ? QStringLiteral("置于顶层") : QStringLiteral("置于底层");
+    return toFront_ ? std::string("置于顶层") : std::string("置于底层");
 }
 
-qint64 ReorderZCommand::estimatedMemory() const
+int64_t ReorderZCommand::estimatedMemory() const
 {
-    return qint64(sizeof(*this)) + qint64(oldZ_.size() + newZ_.size()) * 16;
+    return int64_t(sizeof(*this)) + int64_t(oldZ_.size() + newZ_.size()) * 16;
 }
 
 ur::ContextSet ReorderZCommand::contexts() const
@@ -115,17 +115,17 @@ void SetGroupCommand::undo()
     applyGroup(oldGroups_);
 }
 
-QString SetGroupCommand::text() const
+std::string SetGroupCommand::text() const
 {
     if (newGroup_ == 0)
-        return ids_.size() == 1 ? QStringLiteral("解组")
-                                : QStringLiteral("解组 %1 个图形").arg(ids_.size());
-    return QStringLiteral("成组 %1 个图形").arg(ids_.size());
+        return ids_.size() == 1 ? std::string("解组")
+                                : QStringLiteral("解组 %1 个图形").arg(ids_.size()).toStdString();
+    return QStringLiteral("成组 %1 个图形").arg(ids_.size()).toStdString();
 }
 
-qint64 SetGroupCommand::estimatedMemory() const
+int64_t SetGroupCommand::estimatedMemory() const
 {
-    return qint64(sizeof(*this)) + qint64(ids_.size() + oldGroups_.size()) * 16;
+    return int64_t(sizeof(*this)) + int64_t(ids_.size() + oldGroups_.size()) * 16;
 }
 
 ur::ContextSet SetGroupCommand::contexts() const
