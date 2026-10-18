@@ -1,0 +1,10 @@
+{
+    // CMake Tools 提供 IntelliSense 配置（配合 c_cpp_properties.json）
+    "cmake.configureOnOpen": false,
+    "files.encoding": "utf8",
+    "files.associations": {
+        "*.h": "cpp",
+        "*.cpp": "cpp"
+    },
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
+}

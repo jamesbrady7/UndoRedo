@@ -1,0 +1,71 @@
+{
+    // ═══ 调试配置: F5 启动, preLaunchTask 自动先编译 ═══
+    // 产物路径注意: 本工程 RUNTIME_OUTPUT_DIRECTORY=build/bin,
+    // MSVC 多配置生成器再垫一层 → build/bin/Debug|Release
+    "version": "0.2.0",
+    "configurations": [
+        {
+            // ── 主力: GUI 画布编辑器(真实窗口) ──
+            // 断点推荐: CommandStack::push(合并判定/宏缓冲的分流现场)
+            //   / TransactionScope 析构(abort 回滚) / undoIn(前向搜索+重放)
+            "name": "调试 undoredo_demo (Debug)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/bin/Debug/undoredo_demo.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                { "name": "PATH", "value": "D:\\Qt\\5.15.2\\msvc2019_64\\bin;${env:PATH}" }
+            ],
+            "console": "integratedTerminal",
+            "preLaunchTask": "CMake Build Debug"
+        },
+        {
+            // ── 画布无头电池: S1~S10, 退出码=失败数 ──
+            "name": "demo 自检 (offscreen)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/bin/Debug/undoredo_demo.exe",
+            "args": ["--selftest"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                { "name": "PATH", "value": "D:\\Qt\\5.15.2\\msvc2019_64\\bin;${env:PATH}" },
+                { "name": "QT_QPA_PLATFORM", "value": "offscreen" }
+            ],
+            "console": "integratedTerminal",
+            "preLaunchTask": "CMake Build Debug"
+        },
+        {
+            // ── 框架单测: T1~T14(纯 Core, 秒级) ──
+            "name": "运行 unit_tests (Debug)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/bin/Debug/unit_tests.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                { "name": "PATH", "value": "D:\\Qt\\5.15.2\\msvc2019_64\\bin;${env:PATH}" }
+            ],
+            "console": "integratedTerminal",
+            "preLaunchTask": "CMake Build Debug"
+        },
+        {
+            // ── Release 版 GUI(验证优化后行为一致) ──
+            "name": "运行 undoredo_demo (Release)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/bin/Release/undoredo_demo.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                { "name": "PATH", "value": "D:\\Qt\\5.15.2\\msvc2019_64\\bin;${env:PATH}" }
+            ],
+            "console": "integratedTerminal",
+            "preLaunchTask": "CMake Build Release"
+        }
+    ]
+}

@@ -1,0 +1,77 @@
+{
+    // ═══ 构建任务: Ctrl+Shift+B 触发默认任务(Build Debug) ═══
+    "version": "2.0.0",
+    "tasks": [
+        {
+            // 首次使用或 CMakeLists 大改后跑一次(VS 生成器自动探测 MSVC, 无需 vcvars)
+            "label": "CMake Configure",
+            "type": "shell",
+            "command": "D:/CMAKE/bin/cmake.exe",
+            "args": [
+                "-S", ".", "-B", "build",
+                "-G", "Visual Studio 16 2019", "-A", "x64"
+            ],
+            "problemMatcher": []
+        },
+        {
+            // 默认构建任务(Ctrl+Shift+B): 增量编译 Debug
+            "label": "CMake Build Debug",
+            "type": "shell",
+            "command": "D:/CMAKE/bin/cmake.exe",
+            "args": ["--build", "build", "--config", "Debug"],
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": ["$msCompile"]
+        },
+        {
+            "label": "CMake Build Release",
+            "type": "shell",
+            "command": "D:/CMAKE/bin/cmake.exe",
+            "args": ["--build", "build", "--config", "Release"],
+            "group": "build",
+            "problemMatcher": ["$msCompile"]
+        },
+        // ═══ 直跑通道(Ctrl+F5 的替代): type=process 直接拉起 ═══
+        // 为什么需要: Ctrl+F5 对 cppvsdbg 是直接 spawn, launch.json 的
+        // environment 不生效 → 找不到 Qt5Cored.dll。本机已把 Qt bin 加进
+        // 用户级 PATH, 这两个任务是备份通道。
+        {
+            "label": "undoredo_demo 直跑 (GUI)",
+            "type": "process",
+            "command": "${workspaceFolder}/build/bin/Debug/undoredo_demo.exe",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": { "PATH": "D:\\Qt\\5.15.2\\msvc2019_64\\bin;${env:PATH}" }
+            },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
+            "label": "unit_tests 直跑 (Debug)",
+            "type": "process",
+            "command": "${workspaceFolder}/build/bin/Debug/unit_tests.exe",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": { "PATH": "D:\\Qt\\5.15.2\\msvc2019_64\\bin;${env:PATH}" }
+            },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
+            // 组合: 编译 Debug → 跑画布无头电池(退出码=失败数)
+            "label": "Build & Selftest",
+            "dependsOrder": "sequence",
+            "dependsOn": ["CMake Build Debug"],
+            "type": "shell",
+            "command": "${workspaceFolder}/build/bin/Debug/undoredo_demo.exe",
+            "args": ["--selftest"],
+            "options": {
+                "env": {
+                    "PATH": "D:\\Qt\\5.15.2\\msvc2019_64\\bin;${env:PATH}",
+                    "QT_QPA_PLATFORM": "offscreen"
+                }
+            },
+            "presentation": { "reveal": "always", "panel": "dedicated" },
+            "problemMatcher": []
+        }
+    ]
+}

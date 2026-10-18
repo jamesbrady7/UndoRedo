@@ -1,0 +1,298 @@
+#include "app/SelfTest.h"
+
+#include <QByteArray>
+#include <QHash>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QPointF>
+#include <algorithm>
+#include <cstdio>
+#include <memory>
+#include <stdexcept>
+
+#include "app/MainWindow.h"
+#include "canvas/CanvasScene.h"
+#include "commands/EditCommands.h"
+#include "commands/GeometryCommands.h"
+#include "commands/PropertyCommands.h"
+#include "commands/StructureCommands.h"
+#include "core/CommandFactory.h"
+#include "core/CommandStack.h"
+#include "core/Context.h"
+#include "core/TransactionScope.h"
+
+// ── 断言助手（同 unit_tests 约定：ASCII 符号 + 失败计数）────────────────
+namespace {
+int g_fail = 0;
+int g_ok = 0;
+void checkOk(bool cond, const char* what)
+{
+    if (cond) {
+        printf("  [OK]   %s\n", what);
+        ++g_ok;
+    } else {
+        printf("  [FAIL] %s\n", what);
+        ++g_fail;
+    }
+}
+qint64 g_fakeNow = 1000000;
+qint64 fakeClock() { return g_fakeNow; }
+} // namespace
+
+namespace cd {
+
+void registerDemoPayloads(CanvasScene* scene)
+{
+    ur::CommandFactory::instance().registerType(QStringLiteral("cd.addshape"),
+        [scene](const QJsonObject& data) {
+            return AddShapeCommand::fromPayload(scene, data);
+        });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+int runCanvasSelfTest()
+{
+    printf("UndoRedoDemo canvas selftest —— demo 层集成电池(offscreen)\n");
+    printf("(真实 MainWindow + 真实命令; 退出码 = 失败断言数)\n\n");
+
+    MainWindow w;                       // 不 show()；offscreen 平台下安全
+    CanvasScene* scene = w.scene();
+    ur::CommandStack* stack = w.stack();
+    stack->setClock(fakeClock);         // 假时钟：时间窗合并可确定性驱动
+    registerDemoPayloads(scene);
+
+    // ── S1 增删全遍历：undo 到底 → redo 回来，元数据逐一还原 ──
+    printf("== S1 增/删全遍历 + 元数据还原 ==\n");
+    w.addShape(ShapeKind::Rect);
+    w.addShape(ShapeKind::Ellipse);
+    w.addShape(ShapeKind::Triangle);
+    checkOk(scene->shapeCount() == 3 && stack->count() == 3, "3 图形 3 历史(添加不合并)");
+    QList<ShapeId> ids = scene->allIds();
+    QHash<ShapeId, ShapeMeta> baseline;
+    for (ShapeId id : ids) {
+        ShapeMeta m;
+        scene->getMeta(id, &m);
+        baseline.insert(id, m);
+    }
+    while (stack->canUndo())
+        stack->undo();
+    checkOk(scene->shapeCount() == 0, "undo 到底: 场景清空");
+    while (stack->canRedo())
+        stack->redo();
+    bool metasEqual = scene->shapeCount() == 3;
+    for (ShapeId id : ids) {
+        ShapeMeta m;
+        metasEqual = metasEqual && scene->getMeta(id, &m) && m == baseline[id];
+    }
+    checkOk(metasEqual, "redo 回来: 按原 id 重建且元数据逐一还原");
+
+    // ── S2 拖拽合并：时间窗内 10 连发折叠成一条 ──
+    printf("== S2 拖拽合并(TimeWindow + 手势号) ==\n");
+    scene->selectIds(scene->allIds());
+    const int cntBefore = stack->count();
+    const ShapeId probe = ids.first();
+    ShapeMeta pm;
+    scene->getMeta(probe, &pm);
+    const QPointF startPos = pm.pos;
+    for (int i = 0; i < 10; ++i) {
+        QHash<ShapeId, QPointF> from, to;
+        for (ShapeId id : scene->selectedIds()) {
+            ShapeMeta m;
+            if (!scene->getMeta(id, &m))
+                continue;
+            from.insert(id, m.pos);
+            to.insert(id, m.pos + QPointF(5, 0));
+        }
+        g_fakeNow += 40;                // 40ms/步：全部落在 500ms 窗口内
+        stack->push(std::make_unique<MoveShapesCommand>(scene, from, to, 77));
+    }
+    checkOk(stack->count() == cntBefore + 1, "10 连发折叠成 1 条历史");
+    scene->getMeta(probe, &pm);
+    checkOk(qFuzzyCompare(pm.pos.x(), startPos.x() + 50), "净位移 = 10 x 5 = 50");
+    stack->undo();
+    scene->getMeta(probe, &pm);
+    checkOk(pm.pos == startPos, "undo 一步回到整段拖拽起点");
+    stack->redo();
+    scene->getMeta(probe, &pm);
+    checkOk(qFuzzyCompare(pm.pos.x(), startPos.x() + 50), "redo 一步重放整段");
+    g_fakeNow += 5000;                  // 跨窗：下一次拖拽另起一条
+
+    // ── S3 选择快照：删除 → undo → 对象与选择集一起回来 ──
+    printf("== S3 删除 undo: 原 id 重建 + 选择集恢复 ==\n");
+    scene->selectIds({probe});
+    w.deleteSelected();
+    checkOk(scene->shapeCount() == 2 && scene->findShape(probe) == nullptr, "删除生效");
+    stack->undo();
+    checkOk(scene->findShape(probe) != nullptr, "undo 按原 id 重建(老命令重放仍可达)");
+    checkOk(scene->selectedIds() == QList<ShapeId>{probe}, "选择集随 undo 恢复(selBefore)");
+
+    // ── S4 事务：左对齐多条移动 → 一条 Compound ──
+    printf("== S4 TransactionScope: 左对齐折叠成一条 ==\n");
+    scene->selectIds(scene->allIds());
+    // 注意基准取【游标】而非 count：S3 以 undo 收尾，redo 段还挂着一条"删除"。
+    // 新命令 push 按线性历史语义先截断 redo 段再入账 —— count 净变化为 0，
+    // 游标 +1 才是"事务折叠成一条"的正确断言（这个细节本身就是被测行为）。
+    const int idxS4 = stack->index();
+    QList<qreal> xsBefore;
+    for (ShapeId id : scene->selectedIds()) {
+        ShapeMeta m;
+        scene->getMeta(id, &m);
+        xsBefore.push_back(m.pos.x());
+    }
+    w.alignLeft();
+    checkOk(stack->index() == idxS4 + 1 && stack->count() == idxS4 + 1,
+            "多条移动折叠成一条事务历史(并按线性语义截断 redo 段)");
+    qreal minX = 1e9;
+    bool allAligned = true;
+    for (ShapeId id : scene->allIds()) {
+        ShapeMeta m;
+        scene->getMeta(id, &m);
+        minX = qMin(minX, m.pos.x());
+    }
+    for (ShapeId id : scene->allIds()) {
+        ShapeMeta m;
+        scene->getMeta(id, &m);
+        allAligned = allAligned && qFuzzyCompare(m.pos.x() + 1.0, minX + 1.0);
+    }
+    checkOk(allAligned, "对齐生效: 全部 x == minX");
+    stack->undo();
+    bool restored = true;
+    const QList<ShapeId> sortedIds = scene->allIds();
+    QList<qreal> xsAfter;
+    for (ShapeId id : sortedIds) {
+        ShapeMeta m;
+        scene->getMeta(id, &m);
+        xsAfter.push_back(m.pos.x());
+    }
+    QList<qreal> xsSorted = xsBefore;
+    std::sort(xsSorted.begin(), xsSorted.end());
+    std::sort(xsAfter.begin(), xsAfter.end());
+    for (int i = 0; i < xsSorted.size() && i < xsAfter.size(); ++i)
+        restored = restored && qFuzzyCompare(xsSorted[i] + 1.0, xsAfter[i] + 1.0);
+    checkOk(restored, "事务 undo: 一步还原全部 x");
+
+    // ── S5 异常 abort：事务内抛异常 → 净零 ──
+    printf("== S5 事务异常 abort: 净零 ==\n");
+    const int cntS5 = stack->count();
+    const int shapesS5 = scene->shapeCount();
+    try {
+        ur::TransactionScope tx(stack, QStringLiteral("会中止的操作"));
+        ShapeMeta ghost;
+        ghost.name = QStringLiteral("幽灵");
+        ghost.pos = QPointF(-300, -300);
+        stack->push(std::make_unique<AddShapeCommand>(scene, ghost));
+        throw std::runtime_error("模拟业务异常");
+    } catch (...) {
+    }
+    checkOk(scene->shapeCount() == shapesS5, "已执行的添加被回滚");
+    checkOk(stack->count() == cntS5, "中止事务不留历史");
+
+    // ── S6 context 子序列撤销：只挖属性改动，画布净效果不变 ──
+    printf("== S6 undoIn(inspector): 精准挖除 + 重放不变式 ==\n");
+    {
+        scene->selectIds({probe});
+        ShapeMeta m0;
+        scene->getMeta(probe, &m0);
+        const QColor fill0 = m0.fill;
+
+        QHash<ShapeId, QPointF> from{{probe, m0.pos}}, to{{probe, m0.pos + QPointF(7, 0)}};
+        stack->push(std::make_unique<MoveShapesCommand>(scene, from, to, 88));
+        const QPointF posAfterMove = to.value(probe);
+
+        QHash<ShapeId, QColor> cfrom{{probe, fill0}};
+        stack->push(std::make_unique<SetFillCommand>(scene, QList<ShapeId>{probe},
+                                                     cfrom, QColor(Qt::red)));
+        stack->push(std::make_unique<MoveShapesCommand>(
+            scene, QHash<ShapeId, QPointF>{{probe, posAfterMove}},
+            QHash<ShapeId, QPointF>{{probe, posAfterMove + QPointF(3, 0)}}, 89));
+
+        const int idxBefore = stack->index();
+        checkOk(stack->undoIn({ur::kCtxInspector}), "undoIn(inspector) 命中");
+        ShapeMeta m1;
+        scene->getMeta(probe, &m1);
+        checkOk(m1.fill == fill0, "填充色回滚到改动前");
+        checkOk(m1.pos == posAfterMove + QPointF(3, 0), "画布通道净效果不变(重放)");
+        checkOk(stack->index() == idxBefore, "游标不动(线性历史完好)");
+    }
+
+    // ── S7 历史遍历 + setIndex 任意跳转 ──
+    printf("== S7 history() 遍历 + setIndex 跳转 ==\n");
+    {
+        const QVector<ur::CommandStack::Entry> h = stack->history();
+        checkOk(h.size() == stack->count(), "history() 与栈等长");
+        bool entriesSane = !h.isEmpty();
+        for (const auto& e : h)
+            entriesSane = entriesSane && !e.text.isEmpty() && e.bytes > 0;
+        checkOk(entriesSane, "每条 Entry 有文本/字节(面板与预算的数据源)");
+        const int full = stack->count();
+        stack->setIndex(0);
+        checkOk(scene->shapeCount() == 0, "setIndex(0): 全部添加被撤销");
+        stack->setIndex(full);
+        checkOk(scene->shapeCount() == 3, "setIndex(count): 全部重放回来, 无崩溃");
+    }
+
+    // ── S8 clean 检查点 ──
+    printf("== S8 clean 检查点(保存语义) ==\n");
+    {
+        stack->setClean();
+        checkOk(stack->isClean(), "setClean 即 isClean");
+        w.addShape(ShapeKind::Rect);
+        checkOk(!stack->isClean(), "新命令 -> dirty");
+        stack->undo();
+        checkOk(stack->isClean() && scene->shapeCount() == 3, "undo 回检查点 -> clean");
+    }
+
+    // ── S9 目标安全：目标被删后子序列撤销不崩、不误建 ──
+    printf("== S9 目标安全: 对象已删时 undoIn 优雅降级 ==\n");
+    {
+        const ShapeId victim = scene->allIds().last();
+        ShapeMeta vm;
+        scene->getMeta(victim, &vm);
+        stack->push(std::make_unique<SetFillCommand>(
+            scene, QList<ShapeId>{victim},
+            QHash<ShapeId, QColor>{{victim, vm.fill}}, QColor(Qt::green)));
+        stack->push(std::make_unique<RemoveShapesCommand>(scene, QList<ShapeId>{victim}));
+        checkOk(scene->shapeCount() == 2, "victim 已删除");
+        const bool hit = stack->undoIn({ur::kCtxInspector});
+        checkOk(hit, "向前搜索命中已删目标的改色命令");
+        checkOk(scene->findShape(victim) == nullptr, "undo no-op + 重放后仍保持删除(不崩不误建)");
+        checkOk(scene->shapeCount() == 2, "场景计数不变");
+    }
+
+    // ── S10 payload 往返：AddShape 序列化 -> 工厂重建 -> 回放等价 ──
+    printf("== S10 payload 往返(cd.addshape) ==\n");
+    {
+        ShapeMeta m;
+        m.kind = ShapeKind::Rect;
+        m.name = QStringLiteral("序列化验证");
+        m.pos = QPointF(10, 20);
+        m.size = QSizeF(90, 60);
+        m.fill = QColor(0x33, 0xaa, 0x66);
+        m.z = scene->nextTopZ();
+        AddShapeCommand original(scene, m);
+        const QJsonObject doc = ur::CommandFactory::toPayloadDoc(original);
+        // JSON 文本往返（模拟落盘/网络）
+        const QByteArray json = QJsonDocument(doc).toJson(QJsonDocument::Compact);
+        const QJsonObject reparsed = QJsonDocument::fromJson(json).object();
+        auto rebuilt = ur::CommandFactory::instance().fromPayload(reparsed);
+        checkOk(rebuilt != nullptr, "工厂按类型名重建 AddShapeCommand");
+        const int cntBefore = stack->count();
+        stack->push(std::move(rebuilt));
+        checkOk(scene->shapeCount() == 3 && stack->count() == cntBefore + 1, "重建命令回放生效");
+        bool found = false;
+        for (ShapeId id : scene->allIds()) {
+            ShapeMeta got;
+            if (scene->getMeta(id, &got) && got.name == m.name)
+                found = got.pos == m.pos && got.size == m.size && got.fill == m.fill;
+        }
+        checkOk(found, "回放后的图形与原 payload 完全一致");
+        stack->undo();
+        checkOk(scene->shapeCount() == 2, "重建命令的 undo 同样正确");
+    }
+
+    printf("\n== 汇总: %d OK, %d FAIL ==\n", g_ok, g_fail);
+    printf("== canvas selftest %s ==\n", g_fail == 0 ? "PASS" : "FAIL");
+    return g_fail;
+}
+
+} // namespace cd
