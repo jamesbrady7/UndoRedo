@@ -2,7 +2,7 @@
 
 namespace ur {
 
-CompoundCommand::CompoundCommand(QString text, std::vector<std::unique_ptr<Command>> children)
+CompoundCommand::CompoundCommand(std::string text, std::vector<std::unique_ptr<Command>> children)
     : text_(std::move(text))
     , children_(std::move(children))
 {
@@ -20,9 +20,9 @@ void CompoundCommand::undo()
         (*it)->undo();                  // 逆序：后做的先撤
 }
 
-qint64 CompoundCommand::estimatedMemory() const
+int64_t CompoundCommand::estimatedMemory() const
 {
-    qint64 sum = qint64(sizeof(*this));
+    int64_t sum = int64_t(sizeof(*this));
     for (const auto& c : children_)
         sum += c->estimatedMemory();
     return sum;
@@ -31,8 +31,10 @@ qint64 CompoundCommand::estimatedMemory() const
 ContextSet CompoundCommand::contexts() const
 {
     ContextSet unionSet;
-    for (const auto& c : children_)
-        unionSet.unite(c->contexts());
+    for (const auto& c : children_) {
+        const ContextSet cs = c->contexts();    // 物化局部量：临时量的迭代器不越全表达式
+        unionSet.insert(cs.begin(), cs.end());
+    }
     return unionSet;
 }
 

@@ -5,9 +5,10 @@ project(UndoRedoDemo VERSION 1.0.0 LANGUAGES CXX)
 # UndoRedoDemo —— 自研 undo/redo 命令框架 + QGraphicsView 画布编辑器 demo
 #
 # 三个目标：
-#   undoredo_core  STATIC 库，仅链 Qt5::Core（分层干净的结构性证明：
-#                  框架层若不小心 include 了 Widgets，这里直接编不过）
-#   unit_tests     纯 Core 单元测试，--selftest 退出码=失败数
+#   undoredo_core  STATIC 库，纯 C++17 零依赖（不链任何 Qt——链接器当
+#                  守门员：框架层若不小心 include 了 Qt 头，这里直接编不过。
+#                  通知面走内嵌 Observer 接口，Qt 信号由 app 层 StackBridge 桥接）
+#   unit_tests     纯 C++ 单元测试（与 core 一样零 Qt），退出码=失败数
 #   undoredo_demo  GUI 画布编辑器（故意不加 WIN32：保留控制台，
 #                  --selftest 无头电池的 printf 输出才看得见）
 # ═══════════════════════════════════════════════════════════════════════
@@ -16,10 +17,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # --- 1. 定位 Qt5（5.15.2 / msvc2019_64），换机器只改这一行 ---
+# 只有 demo 目标需要 Qt；Widgets 会传递依赖 Core/Gui，显式只列 Widgets
+# 正是"core/tests 不碰 Qt"的声明式表达。
 if(NOT DEFINED CMAKE_PREFIX_PATH OR CMAKE_PREFIX_PATH STREQUAL "")
     set(CMAKE_PREFIX_PATH "D:/Qt/5.15.2/msvc2019_64")
 endif()
-find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt5 REQUIRED COMPONENTS Widgets)
 
 # --- 2. 自动处理 Q_OBJECT ---
 set(CMAKE_AUTOMOC ON)
@@ -28,9 +31,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
-# --- 4. 框架核心（纯 QtCore，零 Widgets 依赖）---
-# ★ CommandStack.h 带 Q_OBJECT，必须【显式列进源列表】AUTOMOC 才会扫它
-#   （否则只扫 .cpp 及其同名头 → 链接缺 metaObject，NavTreeGroup 已踩过）
+# --- 4. 框架核心（纯 C++17 零依赖：不链 Qt，AUTOMOC 对其空转无害）---
 add_library(undoredo_core STATIC
     src/core/Command.h
     src/core/Context.h
@@ -45,21 +46,25 @@ add_library(undoredo_core STATIC
     src/core/CommandStack.cpp
     src/core/TransactionScope.h
 )
-target_link_libraries(undoredo_core PUBLIC Qt5::Core)
 target_include_directories(undoredo_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# ★ 不写 target_link_libraries(undoredo_core ... Qt5::*)——core 零依赖是
+#   结构性承诺：任何 Qt include 混进 core 都会在这里编译失败，链接器守门。
 
-# --- 5. 单元测试（14 块自包含，退出码=失败数）---
+# --- 5. 单元测试（14 块自包含，退出码=失败数；与 core 一样零 Qt）---
 add_executable(unit_tests
     tests/unit_tests.cpp
 )
 target_link_libraries(unit_tests PRIVATE undoredo_core)
 
 # --- 5b. 画布 demo（GUI；故意不加 WIN32：--selftest 的输出留在控制台）---
-# ★ 带 Q_OBJECT 的头全部显式列出（AUTOMOC 扫描规则，同 core 的注释）
+# ★ 带 Q_OBJECT 的头全部显式列出（AUTOMOC 只扫源列表内文件及其同名头，
+#   漏列 → 链接缺 metaObject，NavTreeGroup 已踩过；StackBridge.h 同理）
 add_executable(undoredo_demo
     src/app/main.cpp
     src/app/MainWindow.h
     src/app/MainWindow.cpp
+    src/app/StackBridge.h
+    src/app/StackBridge.cpp
     src/app/InspectorPanel.h
     src/app/InspectorPanel.cpp
     src/app/HistoryDock.h

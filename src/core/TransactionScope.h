@@ -14,13 +14,13 @@
 //
 //   · 未 commit 就析构（提前 return / 异常栈展开）→ abort：
 //     对已执行的子命令【逆序 undo()】回滚后整体丢弃，净效果为零
-//   · 空事务（scope 内无净 push）→ 自动丢弃，不占栈位不发信号
+//   · 空事务（scope 内无净 push）→ 自动丢弃，不占栈位不发通知
 //     （FreeCAD "隐身事务" UI 困惑的反向教训：明确定义并一致执行）
 //   · 嵌套安全：内层 scope 只回滚自己 mark 之后的部分，结算归最外层
 //
 // 不可拷贝、不可移动——作用域对象就该钉死在一个词法作用域里。
 // ════════════════════════════════════════════════════════════════════════
-#include <QString>
+#include <string>
 #include "core/CommandStack.h"
 
 namespace ur {
@@ -28,7 +28,7 @@ namespace ur {
 class TransactionScope
 {
 public:
-    TransactionScope(CommandStack* stack, const QString& text)
+    TransactionScope(CommandStack* stack, const std::string& text)
         : stack_(stack)
     {
         if (!stack_)

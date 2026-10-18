@@ -10,7 +10,9 @@
 //   · estimatedMemory() 聚合子命令字节 → 字节预算对宏同样生效
 // id 恒为 kCmdCompound，合并策略恒拒（宏是原子步，不参与合并）。
 // ════════════════════════════════════════════════════════════════════════
+#include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 #include "core/Command.h"
 
@@ -19,20 +21,20 @@ namespace ur {
 class CompoundCommand : public Command
 {
 public:
-    CompoundCommand(QString text, std::vector<std::unique_ptr<Command>> children);
+    CompoundCommand(std::string text, std::vector<std::unique_ptr<Command>> children);
 
     void redo() override;               // 正序重放
     void undo() override;               // 逆序回滚
     int  id() const override { return kCmdCompound; }
-    QString text() const override { return text_; }
-    qint64 estimatedMemory() const override;
+    std::string text() const override { return text_; }
+    int64_t estimatedMemory() const override;
     ContextSet contexts() const override;   // 子命令标签的并集
 
     int childCount() const { return int(children_.size()); }
     const Command* childAt(int i) const;
 
 private:
-    QString text_;
+    std::string text_;
     std::vector<std::unique_ptr<Command>> children_;
 };
 

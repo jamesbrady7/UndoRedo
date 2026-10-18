@@ -17,7 +17,7 @@
 // Krita 的 cumulative undo 证明还可以做"与最后 N 条深度合并"——接口已
 // 预留（策略拿到完整判据即可扩展），demo 不实现以控规模。
 // ════════════════════════════════════════════════════════════════════════
-#include <QtGlobal>
+#include <cstdint>
 
 namespace ur {
 
@@ -31,7 +31,7 @@ public:
     // top=栈顶已执行命令，incoming=本次 push 的新命令，
     // lastPushMs=栈顶条目的压栈时间戳，nowMs=当前时刻（均来自可注入时钟）。
     virtual bool canMerge(const Command* top, const Command* incoming,
-                          qint64 lastPushMs, qint64 nowMs) const = 0;
+                          int64_t lastPushMs, int64_t nowMs) const = 0;
 
 protected:
     // 共享的静态判据：id 有效且相等、mergeTag 非空且相等、非 Compound。
@@ -43,21 +43,21 @@ class AdjacentIdMergePolicy : public MergePolicy
 {
 public:
     bool canMerge(const Command* top, const Command* incoming,
-                  qint64 lastPushMs, qint64 nowMs) const override;
+                  int64_t lastPushMs, int64_t nowMs) const override;
 };
 
 class TimeWindowMergePolicy : public MergePolicy
 {
 public:
-    explicit TimeWindowMergePolicy(qint64 windowMs = 500) : windowMs_(windowMs) {}
-    void setWindowMs(qint64 ms) { windowMs_ = ms; }
-    qint64 windowMs() const { return windowMs_; }
+    explicit TimeWindowMergePolicy(int64_t windowMs = 500) : windowMs_(windowMs) {}
+    void setWindowMs(int64_t ms) { windowMs_ = ms; }
+    int64_t windowMs() const { return windowMs_; }
 
     bool canMerge(const Command* top, const Command* incoming,
-                  qint64 lastPushMs, qint64 nowMs) const override;
+                  int64_t lastPushMs, int64_t nowMs) const override;
 
 private:
-    qint64 windowMs_;
+    int64_t windowMs_;
 };
 
 } // namespace ur

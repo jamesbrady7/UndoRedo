@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════════════
-// unit_tests —— undoredo_core 框架层单元测试（纯 QtCore，无 GUI）
+// unit_tests —— undoredo_core 框架层单元测试（纯 C++17，零 Qt 依赖）
 //
 // 约定（照 NavTreeGroup）：
 //   · 14 块自包含测试，每块打印 职责/输入/输出/校验，[OK]/[FAIL] 标记
@@ -8,12 +8,13 @@
 //     并破坏 MSVC 的参数检查）；中文正文本身 GBK 可表示，安全
 //   · 每块自建栈与状态，不跨块共享（"别让测试测它自己"）
 //   · 时间相关一律用注入的假时钟，不用真 sleep（慢机/CI 不翻车）
+//   · 本文件与 core 一样不 include 任何 Qt 头——它是"core 零依赖"的活证据
 // ════════════════════════════════════════════════════════════════════════
-#include <QCoreApplication>
-#include <QJsonObject>
-#include <QJsonDocument>
-#include <stdexcept>
+#include <cstdint>
 #include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "core/Command.h"
 #include "core/CommandStack.h"
@@ -38,8 +39,22 @@ static void checkOk(bool cond, const char* what)
 }
 
 // ── 假时钟（时间窗合并测试的可控时间源）────────────────────────────────
-static qint64 g_fakeNow = 0;
-static qint64 fakeClock() { return g_fakeNow; }
+static int64_t g_fakeNow = 0;
+static int64_t fakeClock() { return g_fakeNow; }
+
+// ── 计数观察者（替代旧版 QObject::connect lambda 计数）──────────────────
+// 纪律示范：Observer 声明在 stack 之后（析构序上先于 stack 死亡），
+// 且在测试尾部显式 removeObserver——调用方代码应当照这个样子写。
+namespace {
+class CountingObserver : public ur::CommandStack::Observer
+{
+public:
+    int idxSignals = 0;
+    int cleanSignals = 0;
+    void onIndexChanged(int) override { ++idxSignals; }
+    void onCleanChanged(bool) override { ++cleanSignals; }
+};
+} // namespace
 
 // ════════════════════════════════════════════════════════════════════════
 // 测试命令：对共享 int 施加 delta（redo=+，undo=-）。
@@ -52,18 +67,18 @@ class TestCommand : public ur::Command
 {
 public:
     TestCommand(int& target, int delta, int id = 100,
-                QString tag = QString(), ur::ContextSet ctx = ur::ContextSet(),
-                qint64 bytes = 64)
+                std::string tag = std::string(), ur::ContextSet ctx = ur::ContextSet(),
+                int64_t bytes = 64)
         : target_(target), delta_(delta), id_(id), tag_(std::move(tag)),
           ctx_(std::move(ctx)), bytes_(bytes) {}
 
     void redo() override { target_ += delta_; }
     void undo() override { target_ -= delta_; }
     int  id() const override { return id_; }
-    QString text() const override { return QStringLiteral("delta%1").arg(delta_); }
-    QString mergeTag() const override { return tag_; }
+    std::string text() const override { return "delta" + std::to_string(delta_); }
+    std::string mergeTag() const override { return tag_; }
     ur::ContextSet contexts() const override { return ctx_; }
-    qint64 estimatedMemory() const override { return bytes_; }
+    int64_t estimatedMemory() const override { return bytes_; }
 
     bool mergeWith(const ur::Command* next) override
     {
@@ -79,15 +94,15 @@ private:
     int& target_;
     int delta_;
     int id_;
-    QString tag_;
+    std::string tag_;
     ur::ContextSet ctx_;
-    qint64 bytes_;
+    int64_t bytes_;
 };
 
 std::unique_ptr<TestCommand> tc(int& target, int delta, int id = 100,
-                                QString tag = QString(),
+                                std::string tag = std::string(),
                                 ur::ContextSet ctx = ur::ContextSet(),
-                                qint64 bytes = 64)
+                                int64_t bytes = 64)
 {
     return std::make_unique<TestCommand>(target, delta, id, std::move(tag),
                                          std::move(ctx), bytes);
@@ -108,14 +123,21 @@ public:
     }
     void undo() override { var_ = from_; }
     int  id() const override { return id_; }
-    QString text() const override { return QStringLiteral("set %1").arg(to_); }
+    std::string text() const override { return "set " + std::to_string(to_); }
     ur::ContextSet contexts() const override { return ctx_; }
-    QString payloadType() const override { return QStringLiteral("test.setvar"); }
-    QJsonObject toPayload() const override
+    std::string payloadType() const override { return "test.setvar"; }
+    // payload 对 core 是不透明文本（约定 JSON）——测试里手写手读即可，
+    // 这正说明 core 完全不认识 JSON：格式知识在调用方。
+    std::string toPayload() const override
     {
-        QJsonObject o;
-        o.insert(QStringLiteral("to"), to_);
-        return o;
+        return "{\"to\":" + std::to_string(to_) + "}";
+    }
+    static int parseTo(const std::string& data)   // creator 侧的解析（演示用）
+    {
+        const size_t p = data.find("\"to\":");
+        if (p == std::string::npos)
+            return 0;
+        return std::stoi(data.substr(p + 5));     // stoi 自动停在 '}' 前
     }
 private:
     int& var_;
@@ -181,13 +203,13 @@ static void t2_truncate_and_selection()
     cmd->selBefore.ids = {1, 2};
     cmd->selAfter.ids = {3};
     stack.push(std::move(cmd));
-    // ⚠ 坑（实测）：QVector<quint64>({3}) 单元素花括号列表在 MSVC 上会绑定到
-    // QVector(int size) 构造出 {0,0,0}（两元素 {1,2} 反而正常走 initializer_list）。
-    // 字面量必须带 ull 后缀，让 QVector(int) 因窄化转换出局。
+    // 注：旧版这里的 QVector<quint64>({3}) 单元素花括号列表坑（MSVC 绑定到
+    // QVector(int size) 构造出 {0,0,0}）随 std::vector 化已消失——
+    // std::vector 的 initializer_list 构造优先于 size_type 构造，无窄化歧义。
     stack.undo();
-    checkOk(applied.ids == QVector<quint64>({1ull, 2ull}), "undo 恢复 selBefore");
+    checkOk(applied.ids == std::vector<uint64_t>({1ull, 2ull}), "undo 恢复 selBefore");
     stack.redo();
-    checkOk(applied.ids == QVector<quint64>({3ull}), "redo 恢复 selAfter");
+    checkOk(applied.ids == std::vector<uint64_t>({3ull}), "redo 恢复 selAfter");
     checkOk(applyCount == 2, "applier 只在步内调用");
 }
 
@@ -219,10 +241,10 @@ static void t4_memory_budget()
     int v = 0;
     ur::CommandStack stack;
     stack.setMemoryBudget(250);
-    stack.push(tc(v, 1, 100, QString(), ur::ContextSet(), 100));
-    stack.push(tc(v, 2, 100, QString(), ur::ContextSet(), 100));
+    stack.push(tc(v, 1, 100, std::string(), ur::ContextSet(), 100));
+    stack.push(tc(v, 2, 100, std::string(), ur::ContextSet(), 100));
     checkOk(stack.totalBytes() == 200 && stack.count() == 2, "200B < 250B 预算, 保留");
-    stack.push(tc(v, 3, 100, QString(), ur::ContextSet(), 100));
+    stack.push(tc(v, 3, 100, std::string(), ur::ContextSet(), 100));
     checkOk(stack.count() == 2 && stack.totalBytes() == 200, "300B 超限 -> 弹栈底至 200B");
     checkOk(v == 6, "效果不回滚(裁的是历史, 不是状态)");
     stack.setMemoryBudget(50);          // 收紧预算立即生效
@@ -237,9 +259,8 @@ static void t5_clean()
     printf("== T5 clean 检查点: setClean/isClean 随游标 + 裁剪丢失 ==\n");
     int v = 0;
     ur::CommandStack stack;
-    int cleanSignals = 0;
-    QObject::connect(&stack, &ur::CommandStack::cleanChanged,
-                     [&](bool) { ++cleanSignals; });
+    CountingObserver obs;               // 声明在 stack 之后 → 先于 stack 析构
+    stack.addObserver(&obs);
     stack.push(tc(v, 1));
     stack.push(tc(v, 2));
     stack.setClean();
@@ -269,34 +290,35 @@ static void t5_clean()
     s2.setUndoLimit(1);                 // 弹栈底 → cleanIndex 0 -> -1(丢失)
     s2.undo();
     checkOk(!s2.isClean(), "零位检查点随栈底弹出永久丢失(不假装 clean)");
-    checkOk(cleanSignals >= 3, "cleanChanged 只在变位时发");
+    checkOk(obs.cleanSignals >= 3, "cleanChanged 只在变位时发");
+    stack.removeObserver(&obs);         // 纪律示范: Observer 析构前显式 remove
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// T6 最小信号面：批量操作只发一次 indexChanged
+// T6 最小通知面：批量操作只发一次 indexChanged
 // ════════════════════════════════════════════════════════════════════════
 static void t6_signals()
 {
-    printf("== T6 最小信号面: setIndex 跨 N 步只发一次 ==\n");
+    printf("== T6 最小通知面: setIndex 跨 N 步只发一次 ==\n");
     int v = 0;
     ur::CommandStack stack;
-    int idxSignals = 0;
-    QObject::connect(&stack, &ur::CommandStack::indexChanged,
-                     [&](int) { ++idxSignals; });
+    CountingObserver obs;
+    stack.addObserver(&obs);
     stack.push(tc(v, 1));
     stack.push(tc(v, 2));
     stack.push(tc(v, 3));
-    checkOk(idxSignals == 3, "push 每次一发");
-    idxSignals = 0;
+    checkOk(obs.idxSignals == 3, "push 每次一发");
+    obs.idxSignals = 0;
     stack.setIndex(0);                  // 跨 3 步批量回退
-    checkOk(idxSignals == 1, "setIndex(3->0) 只发一次 indexChanged");
+    checkOk(obs.idxSignals == 1, "setIndex(3->0) 只发一次 indexChanged");
     checkOk(v == 0, "批量 undo 效果正确");
-    idxSignals = 0;
+    obs.idxSignals = 0;
     stack.setIndex(3);
-    checkOk(idxSignals == 1 && v == 6, "setIndex(0->3) 只发一次且效果正确");
-    idxSignals = 0;
+    checkOk(obs.idxSignals == 1 && v == 6, "setIndex(0->3) 只发一次且效果正确");
+    obs.idxSignals = 0;
     stack.setIndex(3);                  // 原地跳转
-    checkOk(idxSignals == 0, "setIndex 到当前位: 零信号");
+    checkOk(obs.idxSignals == 0, "setIndex 到当前位: 零通知");
+    stack.removeObserver(&obs);
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -311,18 +333,18 @@ static void t7_history()
     stack.setClock(fakeClock);
     stack.setMergePolicy(std::make_unique<ur::TimeWindowMergePolicy>(500));
     ur::ContextSet ctxCanvas; ctxCanvas.insert(ur::kCtxCanvas);
-    stack.push(tc(v, 1, 100, QStringLiteral("m"), ctxCanvas));
+    stack.push(tc(v, 1, 100, "m", ctxCanvas));
     g_fakeNow = 1200;
-    stack.push(tc(v, 2, 100, QStringLiteral("m"), ctxCanvas));  // 窗口内 → 合并
+    stack.push(tc(v, 2, 100, "m", ctxCanvas));    // 窗口内 → 合并
     g_fakeNow = 5000;
-    stack.push(tc(v, 3, 101, QString(), ctxCanvas));            // 不合并
+    stack.push(tc(v, 3, 101, std::string(), ctxCanvas));  // 不合并
 
-    const QVector<ur::CommandStack::Entry> h = stack.history();
+    const std::vector<ur::CommandStack::Entry> h = stack.history();
     checkOk(h.size() == 2, "合并后历史 2 条(可遍历, Qt 栈无此 API)");
-    checkOk(h[0].text == QStringLiteral("delta3"), "合并条文本反映最终 delta(1+2)");
+    checkOk(h[0].text == "delta3", "合并条文本反映最终 delta(1+2)");
     checkOk(h[0].merged, "merged 标记 = 曾吸收后续命令");
     checkOk(h[0].timestampMs == 1200, "合并刷新时间戳到最新");
-    checkOk(h[0].contexts.contains(ur::kCtxCanvas), "context 冻结在 Entry 里");
+    checkOk(ur::containsCtx(h[0].contexts, ur::kCtxCanvas), "context 冻结在 Entry 里");
     checkOk(h[1].timestampMs == 5000 && !h[1].merged, "第二条独立");
     checkOk(h[0].bytes > 0 && h[1].bytes > 0, "字节数入账(预算/面板展示用)");
     checkOk(stack.totalBytes() == h[0].bytes + h[1].bytes, "totalBytes == sum(entry.bytes)");
@@ -336,17 +358,17 @@ static void t8_macro()
     printf("== T8 宏: 多条折叠 Compound / 嵌套归外层 / 单条直入 ==\n");
     int v = 0;
     ur::CommandStack stack;
-    stack.beginMacro(QStringLiteral("组合操作"));
+    stack.beginMacro("组合操作");        // /utf-8 下窄字面量即 UTF-8（core 约定编码）
     stack.push(tc(v, 1));
     stack.push(tc(v, 2));
-    stack.beginMacro(QStringLiteral("内层"));   // 嵌套: 折叠进外层
+    stack.beginMacro("内层");           // 嵌套: 折叠进外层
     stack.push(tc(v, 3));
     stack.endMacro();
     stack.push(tc(v, 4));
     stack.endMacro();
     checkOk(stack.count() == 1, "宏对外呈现单条历史");
     checkOk(v == 10, "子命令全部已执行(push 即执行, 宏内也不例外)");
-    checkOk(stack.history()[0].text == QStringLiteral("组合操作"), "最外层文本生效");
+    checkOk(stack.history()[0].text == "组合操作", "最外层文本生效");
     checkOk(!stack.isMacroActive(), "宏已结算");
     stack.undo();
     checkOk(v == 0, "Compound undo 逆序回滚全部子命令");
@@ -355,11 +377,11 @@ static void t8_macro()
 
     // 单条宏: 不包 Compound, 直接入账(保留子命令自己的文本)
     ur::CommandStack s2;
-    s2.beginMacro(QStringLiteral("不该出现的宏名"));
+    s2.beginMacro("不该出现的宏名");
     int w = 0;
     s2.push(tc(w, 9));
     s2.endMacro();
-    checkOk(s2.count() == 1 && s2.history()[0].text == QStringLiteral("delta9"),
+    checkOk(s2.count() == 1 && s2.history()[0].text == "delta9",
             "单条宏直入, 保留子命令文本");
 }
 
@@ -368,22 +390,22 @@ static void t8_macro()
 // ════════════════════════════════════════════════════════════════════════
 static void t9_empty_transaction()
 {
-    printf("== T9 空事务: commit/未 commit 都自动丢弃, 零栈位零信号 ==\n");
+    printf("== T9 空事务: commit/未 commit 都自动丢弃, 零栈位零通知 ==\n");
     ur::CommandStack stack;
-    int idxSignals = 0;
-    QObject::connect(&stack, &ur::CommandStack::indexChanged,
-                     [&](int) { ++idxSignals; });
+    CountingObserver obs;
+    stack.addObserver(&obs);
     {
-        ur::TransactionScope tx(&stack, QStringLiteral("空事务A"));
+        ur::TransactionScope tx(&stack, "空事务A");
         tx.commit();
     }
     {
-        ur::TransactionScope tx(&stack, QStringLiteral("空事务B"));
+        ur::TransactionScope tx(&stack, "空事务B");
         (void)tx;                       // 未 commit 的空事务
     }
     checkOk(stack.count() == 0, "空事务不占栈位");
-    checkOk(idxSignals == 0, "空事务零信号(不污染历史面板)");
+    checkOk(obs.idxSignals == 0, "空事务零通知(不污染历史面板)");
     checkOk(!stack.isMacroActive(), "宏深度已结算归零");
+    stack.removeObserver(&obs);
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -405,7 +427,7 @@ static void t10_exception_abort()
         int& order_; int stamp_;
     };
     try {
-        ur::TransactionScope tx(&stack, QStringLiteral("会失败的操作"));
+        ur::TransactionScope tx(&stack, "会失败的操作");
         stack.push(std::make_unique<OrderProbe>(v, 5, undoOrder, 1));
         stack.push(std::make_unique<OrderProbe>(v, 3, undoOrder, 2));
         throw std::runtime_error("模拟业务异常");
@@ -429,9 +451,9 @@ static void t11_adjacent_merge()
     printf("== T11 AdjacentId 合并: 连续同类操作折成一条 ==\n");
     int v = 0;
     ur::CommandStack stack;             // 默认策略 = AdjacentIdMergePolicy
-    stack.push(tc(v, 5, 100, QStringLiteral("drag#1")));
-    stack.push(tc(v, 3, 100, QStringLiteral("drag#1")));
-    stack.push(tc(v, 2, 100, QStringLiteral("drag#1")));
+    stack.push(tc(v, 5, 100, "drag#1"));
+    stack.push(tc(v, 3, 100, "drag#1"));
+    stack.push(tc(v, 2, 100, "drag#1"));
     checkOk(stack.count() == 1, "同 id + 同 tag: 三条合并成一条");
     checkOk(v == 10, "效果全部生效(5+3+2)");
     stack.undo();
@@ -440,15 +462,15 @@ static void t11_adjacent_merge()
     checkOk(v == 10, "redo 一步重放整段");
 
     // tag 不同(换了手势/目标) → 阻断合并
-    stack.push(tc(v, 1, 100, QStringLiteral("drag#2")));
+    stack.push(tc(v, 1, 100, "drag#2"));
     checkOk(stack.count() == 2, "mergeTag 变化即阻断(极性/换目标防线)");
     // id 不同 → 阻断
-    stack.push(tc(v, 1, 102, QStringLiteral("drag#2")));
+    stack.push(tc(v, 1, 102, "drag#2"));
     checkOk(stack.count() == 3, "id 不同不合并");
     // 有 redo 段时不合并(只与"当前栈顶已执行命令"合并)
     stack.undo();
     const int before = stack.count();
-    stack.push(tc(v, 7, 102, QStringLiteral("drag#2")));
+    stack.push(tc(v, 7, 102, "drag#2"));
     checkOk(stack.count() == before - 1 + 1, "push 先截断 redo 段再入账");
 }
 
@@ -464,22 +486,22 @@ static void t12_time_window()
     stack.setMergePolicy(std::make_unique<ur::TimeWindowMergePolicy>(500));
 
     g_fakeNow = 10000;
-    stack.push(tc(v, 1, 200, QStringLiteral("slider")));
+    stack.push(tc(v, 1, 200, "slider"));
     g_fakeNow = 10100;                  // +100ms, 窗口内
-    stack.push(tc(v, 1, 200, QStringLiteral("slider")));
+    stack.push(tc(v, 1, 200, "slider"));
     g_fakeNow = 10400;                  // 距上次 +300ms, 仍在窗口内
-    stack.push(tc(v, 1, 200, QStringLiteral("slider")));
+    stack.push(tc(v, 1, 200, "slider"));
     checkOk(stack.count() == 1 && v == 3, "窗口内连续滑条输入合并成一条");
 
     g_fakeNow = 11000;                  // 距上次 +600ms, 超窗
-    stack.push(tc(v, 1, 200, QStringLiteral("slider")));
+    stack.push(tc(v, 1, 200, "slider"));
     checkOk(stack.count() == 2, "超过 500ms 窗口 -> 新历史条目(一次停顿=一步)");
 
     // 空 tag = 未声明合并许可 → 时间窗内也拒绝
     g_fakeNow = 11100;
-    stack.push(tc(v, 1, 201, QString()));
+    stack.push(tc(v, 1, 201, std::string()));
     g_fakeNow = 11150;
-    stack.push(tc(v, 1, 201, QString()));
+    stack.push(tc(v, 1, 201, std::string()));
     checkOk(stack.count() == 4, "空 mergeTag 永不合并(保守默认, 比 Qt 更安全)");
 }
 
@@ -526,11 +548,11 @@ static void t13_context_filter()
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// T14 序列化就绪：payload → JSON → 工厂重建 → 回放等价
+// T14 序列化就绪：payload 文本 → 工厂重建 → 回放等价
 // ════════════════════════════════════════════════════════════════════════
 static void t14_payload()
 {
-    printf("== T14 payload 序列化: JSON 化 -> 工厂重建 -> 回放等价 ==\n");
+    printf("== T14 payload 序列化: 不透明文本 -> 工厂重建 -> 回放等价 ==\n");
     int var1 = 0, var2 = 100;
     ur::CommandStack stack;
     stack.push(std::make_unique<SetVarCommand>(var1, 42));
@@ -539,18 +561,21 @@ static void t14_payload()
     // 取栈内命令不可行(栈不暴露), 演示路径: 对"同型命令"做序列化往返。
     // 这正是审计日志/跨会话 undo 的真实形态: 执行时留档, 恢复时重建。
     SetVarCommand original(var1, 42);
-    const QJsonObject doc = ur::CommandFactory::toPayloadDoc(original);
-    checkOk(doc.value(QStringLiteral("type")).toString() == QStringLiteral("test.setvar"),
-            "payload 文档 = {type, data}");
+    const ur::Payload doc = ur::CommandFactory::toPayloadDoc(original);
+    checkOk(doc.type == "test.setvar" && !doc.data.empty(),
+            "payload 文档 = {type, data}(data 对 core 不透明)");
+
+    // "过线"模拟: 存档再读回(文本原样往返, 字节级相等)
+    const ur::Payload wire{doc.type, doc.data};
+    checkOk(wire.data == doc.data, "payload 文本往返字节级相等");
 
     int& captured = var2;
-    ur::CommandFactory::instance().registerType(QStringLiteral("test.setvar"),
-        [&captured](const QJsonObject& data) {
+    ur::CommandFactory::instance().registerType("test.setvar",
+        [&captured](const std::string& data) {
             return std::make_unique<SetVarCommand>(captured,
-                                                   data.value(QStringLiteral("to")).toInt());
+                                                   SetVarCommand::parseTo(data));
         });
-    auto rebuilt = ur::CommandFactory::instance().fromPayload(
-        QJsonDocument::fromJson(QJsonDocument(doc).toJson()).object());
+    auto rebuilt = ur::CommandFactory::instance().fromPayload(wire);
     checkOk(rebuilt != nullptr, "工厂按类型名重建命令");
 
     ur::CommandStack stack2;
@@ -560,25 +585,23 @@ static void t14_payload()
     checkOk(var2 == 100, "重建命令的 undo 同样正确(初态在首次 redo 时捕获)");
 
     // 未注册类型 → nullptr(不崩, 优雅降级)
-    QJsonObject bogus;
-    bogus.insert(QStringLiteral("type"), QStringLiteral("no.such"));
-    bogus.insert(QStringLiteral("data"), QJsonObject());
-    checkOk(ur::CommandFactory::instance().fromPayload(bogus) == nullptr,
+    checkOk(ur::CommandFactory::instance().fromPayload(
+                ur::Payload{"no.such", "{}"}) == nullptr,
             "未注册类型返回 nullptr");
-    // 不可序列化命令(payloadType 空) → 空文档
+    // 空 type(不可序列化命令的 toPayloadDoc 结果) → nullptr
+    checkOk(ur::CommandFactory::instance().fromPayload(ur::Payload{}) == nullptr,
+            "空 type 返回 nullptr");
+    // 不可序列化命令(payloadType 空) → type 为空的 Payload
     int v = 0;
     TestCommand plain(v, 1);
-    checkOk(ur::CommandFactory::toPayloadDoc(plain).isEmpty(),
-            "未声明 payloadType 的命令 toPayloadDoc 为空");
+    checkOk(ur::CommandFactory::toPayloadDoc(plain).type.empty(),
+            "未声明 payloadType 的命令 toPayloadDoc 为空 type");
 }
 
 // ════════════════════════════════════════════════════════════════════════
-int main(int argc, char* argv[])
+int main()
 {
-    QCoreApplication app(argc, argv);
-    Q_UNUSED(app.arguments())
-
-    printf("UndoRedoDemo unit_tests —— undoredo_core 框架 14 块自检\n");
+    printf("UndoRedoDemo unit_tests —— undoredo_core 框架 14 块自检(零 Qt 依赖)\n");
     printf("(每块自包含; 退出码 = 失败断言数)\n\n");
 
     t1_basic();

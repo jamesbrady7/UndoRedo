@@ -15,21 +15,21 @@ bool MergePolicy::mergeCompatible(const Command* top, const Command* incoming)
         return false;
     // mergeTag 是极性/目标阻断键：空 tag = 未声明合并许可 → 拒绝；
     // tag 不同（换了目标对象/手势会话）→ 拒绝
-    const QString t = top->mergeTag();
-    const QString n = incoming->mergeTag();
-    return !t.isEmpty() && t == n;
+    const std::string t = top->mergeTag();
+    const std::string n = incoming->mergeTag();
+    return !t.empty() && t == n;
 }
 
 bool AdjacentIdMergePolicy::canMerge(const Command* top, const Command* incoming,
-                                     qint64 lastPushMs, qint64 nowMs) const
+                                     int64_t lastPushMs, int64_t nowMs) const
 {
-    Q_UNUSED(lastPushMs)
-    Q_UNUSED(nowMs)
+    (void)lastPushMs;
+    (void)nowMs;
     return mergeCompatible(top, incoming);
 }
 
 bool TimeWindowMergePolicy::canMerge(const Command* top, const Command* incoming,
-                                     qint64 lastPushMs, qint64 nowMs) const
+                                     int64_t lastPushMs, int64_t nowMs) const
 {
     if (!mergeCompatible(top, incoming))
         return false;

@@ -1,24 +1,56 @@
 #include "core/CommandStack.h"
 
-#include <QDateTime>
 #include <algorithm>
+#include <chrono>
 #include "core/CompoundCommand.h"
 
 namespace ur {
 
-CommandStack::CommandStack(QObject* parent)
-    : QObject(parent)
-    , policy_(std::make_unique<AdjacentIdMergePolicy>())
+CommandStack::CommandStack()
+    : policy_(std::make_unique<AdjacentIdMergePolicy>())
 {
 }
 
 CommandStack::~CommandStack() = default;
 
+// ── 通知面 ─────────────────────────────────────────────────────────────
+void CommandStack::addObserver(Observer* o)
+{
+    if (!o)
+        return;
+    for (Observer* e : observers_)
+        if (e == o)
+            return;                     // 重复添加忽略（幂等）
+    observers_.push_back(o);
+}
+
+void CommandStack::removeObserver(Observer* o)
+{
+    observers_.erase(std::remove(observers_.begin(), observers_.end(), o),
+                     observers_.end());
+}
+
+// 发射=拷贝指针快照后遍历：回调内增删 Observer 不会使本轮迭代失效
+//（增删的生效时机是下一轮发射；纪律见头注释）。
+void CommandStack::notifyIndexChanged(int index)
+{
+    const std::vector<Observer*> snapshot = observers_;
+    for (Observer* o : snapshot)
+        o->onIndexChanged(index);
+}
+
+void CommandStack::notifyCleanChanged(bool clean)
+{
+    const std::vector<Observer*> snapshot = observers_;
+    for (Observer* o : snapshot)
+        o->onCleanChanged(clean);
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // push —— 全部机制的汇聚点，流程（与设计精讲 §5 的图一致）：
 //   ① 盖选择快照(前) → ② cmd->redo()（push 即执行）→ ③ 盖选择快照(后)
 //   → ④ 宏激活？入缓冲区返回 → ⑤ 合并判定（仅 redo 段空 + 栈顶）
-//   → ⑥ 截断 redo 段 → ⑦ append + 冻结 Entry → ⑧ 双预算裁剪 → ⑨ 信号
+//   → ⑥ 截断 redo 段 → ⑦ append + 冻结 Entry → ⑧ 双预算裁剪 → ⑨ 通知
 // ════════════════════════════════════════════════════════════════════════
 void CommandStack::push(std::unique_ptr<Command> cmd)
 {
@@ -34,9 +66,9 @@ void CommandStack::push(std::unique_ptr<Command> cmd)
     if (selProvider_)
         cmd->selAfter = captureSelection();
 
-    const qint64 now = nowMs();
+    const int64_t now = nowMs();
 
-    // ④ 宏缓冲区：宏内 push 不逐条入账、不发信号（结算在 endMacro）
+    // ④ 宏缓冲区：宏内 push 不逐条入账、不发通知（结算在 endMacro）
     if (macroDepth_ > 0) {
         macroBuf_.push_back(std::move(cmd));
         return;
@@ -50,16 +82,16 @@ void CommandStack::push(std::unique_ptr<Command> cmd)
             && top->mergeWith(cmd.get())) {
             // 吸收成功：更新栈顶 Entry 的字节/时间戳/merged 标记。
             // 游标与条数不变，但仍发一次 indexChanged——历史面板要刷新
-            // 栈顶文本/字节（"最小信号面"= 只用这一个信号承载所有刷新）。
-            const qint64 oldBytes = entries_.back().bytes;
-            const qint64 newBytes = top->estimatedMemory();
+            // 栈顶文本/字节（"最小通知面"= 只用这一个回调承载所有刷新）。
+            const int64_t oldBytes = entries_.back().bytes;
+            const int64_t newBytes = top->estimatedMemory();
             entries_.back().text = top->text();     // 文本反映合并后的最终效果
             entries_.back().bytes = newBytes;
             entries_.back().timestampMs = now;
             entries_.back().merged = true;
             top->selAfter = cmd->selAfter;  // 选择快照更新到最新效果之后
             totalBytes_ += newBytes - oldBytes;
-            emit indexChanged(index_);
+            notifyIndexChanged(index_);
             return;                     // cmd 随 unique_ptr 析构被丢弃
         }
     }
@@ -68,12 +100,12 @@ void CommandStack::push(std::unique_ptr<Command> cmd)
     truncateRedo();                     // ⑥ 新命令杀死 redo 段（线性历史语义）
     cmds_.push_back(std::move(cmd));
     Entry e = makeEntry(cmds_.back().get(), now);   // ⑦ 元数据在此冻结
-    entries_.append(e);
+    entries_.push_back(e);
     neutralized_.push_back(0);
     index_ = int(cmds_.size());
     totalBytes_ += e.bytes;
     trimBudgetQuiet();                  // ⑧ 双预算从栈底裁剪
-    emit indexChanged(index_);          // ⑨
+    notifyIndexChanged(index_);         // ⑨
     emitCleanIfChanged(wasClean);
 }
 
@@ -84,7 +116,7 @@ bool CommandStack::undo()
         return false;
     const bool wasClean = isClean();
     stepUndoInternal(true);
-    emit indexChanged(index_);
+    notifyIndexChanged(index_);
     emitCleanIfChanged(wasClean);
     return true;
 }
@@ -95,7 +127,7 @@ bool CommandStack::redo()
         return false;
     const bool wasClean = isClean();
     stepRedoInternal(true);
-    emit indexChanged(index_);
+    notifyIndexChanged(index_);
     emitCleanIfChanged(wasClean);
     return true;
 }
@@ -121,7 +153,7 @@ void CommandStack::stepRedoInternal(bool applySel)
 // ── context 过滤撤销（Eclipse 式向前搜索 + 上方重放）───────────────────
 bool CommandStack::canUndoIn(const ContextSet& ctx) const
 {
-    if (ctx.isEmpty())
+    if (ctx.empty())
         return canUndo();
     for (int i = index_ - 1; i >= 0; --i) {
         if (!neutralized_[size_t(i)] && matchesContext(cmds_[size_t(i)].get(), ctx))
@@ -132,7 +164,7 @@ bool CommandStack::canUndoIn(const ContextSet& ctx) const
 
 bool CommandStack::undoIn(const ContextSet& ctx)
 {
-    if (ctx.isEmpty())
+    if (ctx.empty())
         return undo();
     int k = -1;
     for (int i = index_ - 1; i >= 0; --i) {     // 向前搜索首条命中（跳过已中和）
@@ -163,7 +195,7 @@ bool CommandStack::undoIn(const ContextSet& ctx)
     }
 
     applySelection(selNow);             // 选择集恢复原状（游标未动）
-    emit indexChanged(index_);          // 内容变了，历史面板要刷新
+    notifyIndexChanged(index_);         // 内容变了，历史面板要刷新
     emitCleanIfChanged(wasClean);
     return true;
 }
@@ -173,8 +205,8 @@ bool CommandStack::matchesContext(const Command* c, const ContextSet& ctx)
     if (!c)
         return false;
     const ContextSet cs = c->contexts();    // Compound 穿透：聚合子命令标签
-    for (const QString& s : cs) {
-        if (ctx.contains(s))
+    for (const std::string& s : cs) {
+        if (containsCtx(ctx, s))
             return true;
     }
     return false;
@@ -183,7 +215,7 @@ bool CommandStack::matchesContext(const Command* c, const ContextSet& ctx)
 // ── 历史导航 ───────────────────────────────────────────────────────────
 void CommandStack::setIndex(int i)
 {
-    i = qBound(0, i, count());
+    i = std::clamp(i, 0, count());
     if (i == index_)
         return;
     const bool wasClean = isClean();
@@ -191,12 +223,12 @@ void CommandStack::setIndex(int i)
         stepUndoInternal(false);        // 批量：中间步不应用选择快照
     while (index_ < i)
         stepRedoInternal(false);
-    // 选择快照只在终点应用一次（避免中间态闪烁与信号风暴）
+    // 选择快照只在终点应用一次（避免中间态闪烁与通知风暴）
     if (i > 0)
         applySelection(cmds_[size_t(i - 1)]->selAfter);
     else
         applySelection(SelectionMemento());
-    emit indexChanged(index_);          // 跨 N 步只发一次
+    notifyIndexChanged(index_);         // 跨 N 步只发一次
     emitCleanIfChanged(wasClean);
 }
 
@@ -212,7 +244,7 @@ void CommandStack::clear()
     macroDepth_ = 0;
     macroBuf_.clear();
     macroText_.clear();
-    emit indexChanged(0);
+    notifyIndexChanged(0);
     emitCleanIfChanged(wasClean);
 }
 
@@ -222,17 +254,17 @@ void CommandStack::setUndoLimit(int steps)
     undoLimit_ = steps;
     const bool wasClean = isClean();
     if (trimBudgetQuiet()) {
-        emit indexChanged(index_);
+        notifyIndexChanged(index_);
         emitCleanIfChanged(wasClean);
     }
 }
 
-void CommandStack::setMemoryBudget(qint64 bytes)
+void CommandStack::setMemoryBudget(int64_t bytes)
 {
     memoryBudget_ = bytes;
     const bool wasClean = isClean();
     if (trimBudgetQuiet()) {
-        emit indexChanged(index_);
+        notifyIndexChanged(index_);
         emitCleanIfChanged(wasClean);
     }
 }
@@ -251,9 +283,9 @@ bool CommandStack::trimBudgetQuiet()
             break;
         totalBytes_ -= entries_.front().bytes;
         cmds_.erase(cmds_.begin());
-        entries_.removeFirst();
+        entries_.erase(entries_.begin());
         neutralized_.erase(neutralized_.begin());
-        index_ = qMax(0, index_ - 1);
+        index_ = (std::max)(0, index_ - 1);   // 括号防 Windows 的 max 宏
         if (cleanIndex_ >= 0) {
             --cleanIndex_;
             if (cleanIndex_ < 0)
@@ -267,7 +299,7 @@ bool CommandStack::trimBudgetQuiet()
 void CommandStack::setClean()
 {
     cleanIndex_ = index_;
-    emit cleanChanged(true);
+    notifyCleanChanged(true);           // 无条件发（与 Qt setClean 语义一致，非变位才发）
 }
 
 // ── 策略注入 ───────────────────────────────────────────────────────────
@@ -277,7 +309,7 @@ void CommandStack::setMergePolicy(std::unique_ptr<MergePolicy> p)
 }
 
 // ── 宏原语 ─────────────────────────────────────────────────────────────
-void CommandStack::beginMacro(const QString& text)
+void CommandStack::beginMacro(const std::string& text)
 {
     if (macroDepth_ == 0) {
         macroText_ = text;              // 最外层文本生效（嵌套宏折叠进外层）
@@ -296,9 +328,9 @@ void CommandStack::endMacro()
 
     // 最外层结算（GIMP undo_group_end 语义）：
     if (macroBuf_.empty())
-        return;                         // 空事务自动丢弃：不占栈位、不发信号
+        return;                         // 空事务自动丢弃：不占栈位、不发通知
     const bool wasClean = isClean();
-    const qint64 now = nowMs();
+    const int64_t now = nowMs();
     if (macroBuf_.size() == 1) {
         appendExecuted(std::move(macroBuf_.front()), now, wasClean);
     } else {
@@ -314,32 +346,35 @@ void CommandStack::rollbackMacroTo(int mark)
 {
     if (macroDepth_ == 0)
         return;
-    mark = qBound(0, mark, int(macroBuf_.size()));
+    mark = std::clamp(mark, 0, int(macroBuf_.size()));
     for (int i = int(macroBuf_.size()) - 1; i >= mark; --i)
         macroBuf_[size_t(i)]->undo();   // 逆序回滚已执行的子命令
     macroBuf_.resize(size_t(mark));
 }
 
 // 已执行命令入账（不再执行 redo、不做合并判定——宏是原子历史步）
-void CommandStack::appendExecuted(std::unique_ptr<Command> cmd, qint64 timestampMs,
+void CommandStack::appendExecuted(std::unique_ptr<Command> cmd, int64_t timestampMs,
                                   bool wasClean)
 {
     truncateRedo();
     cmds_.push_back(std::move(cmd));
     Entry e = makeEntry(cmds_.back().get(), timestampMs);
-    entries_.append(e);
+    entries_.push_back(e);
     neutralized_.push_back(0);
     index_ = int(cmds_.size());
     totalBytes_ += e.bytes;
     trimBudgetQuiet();
-    emit indexChanged(index_);
+    notifyIndexChanged(index_);
     emitCleanIfChanged(wasClean);
 }
 
 // ── 内部工具 ───────────────────────────────────────────────────────────
-qint64 CommandStack::nowMs() const
+int64_t CommandStack::nowMs() const
 {
-    return clock_ ? clock_() : QDateTime::currentMSecsSinceEpoch();
+    if (clock_)
+        return clock_();
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
 SelectionMemento CommandStack::captureSelection() const
@@ -358,12 +393,12 @@ void CommandStack::truncateRedo()
     while (int(cmds_.size()) > index_) {
         totalBytes_ -= entries_.back().bytes;
         cmds_.pop_back();
-        entries_.removeLast();
+        entries_.pop_back();
         neutralized_.pop_back();
     }
 }
 
-CommandStack::Entry CommandStack::makeEntry(const Command* c, qint64 timestampMs) const
+CommandStack::Entry CommandStack::makeEntry(const Command* c, int64_t timestampMs) const
 {
     Entry e;
     e.text = c->text();
@@ -377,7 +412,7 @@ CommandStack::Entry CommandStack::makeEntry(const Command* c, qint64 timestampMs
 void CommandStack::emitCleanIfChanged(bool wasClean)
 {
     if (wasClean != isClean())
-        emit cleanChanged(isClean());
+        notifyCleanChanged(isClean());
 }
 
 } // namespace ur
