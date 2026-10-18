@@ -3,8 +3,8 @@
 //   undoredo_demo.exe              交互 GUI（画布编辑器）
 //   undoredo_demo.exe --selftest   offscreen 无头电池（退出码=失败数）
 //
-// 可序列化命令的工厂注册也在这里（应用装配层的职责）：
-// 命令类型 -> creator 绑定场景指针，payload 回放时按 id/快照重建。
+// 可序列化命令的工厂注册在应用装配层（SelfTest.cpp::registerDemoPayloads）：
+// 命令类型 -> creator 绑定场景指针收不透明 payload 文本，回放时按 id/快照重建。
 // ════════════════════════════════════════════════════════════════════════
 #include <QApplication>
 #include <QProcessEnvironment>

@@ -10,8 +10,8 @@
 //  3. 幂等：AddShape::redo 发现 id 已存在 → no-op（undoIn 重放 /
 //     setIndex 跳转都可能重复执行 redo，绝不能重复建对象）
 //
-// AddShape 还是 payload 序列化示例之一（toPayload/fromPayload +
-// CommandFactory 注册见 main.cpp）。
+// AddShape 还是 payload 序列化示例之一（toPayload/fromPayload 出入口是
+// 不透明 JSON 文本；CommandFactory 注册见 SelfTest.cpp::registerDemoPayloads）。
 // ════════════════════════════════════════════════════════════════════════
 #include <QList>
 #include <QVector>
