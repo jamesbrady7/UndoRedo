@@ -9,6 +9,7 @@
 // 运行：undoredo_demo.exe --selftest（launcher 注入 QT_QPA_PLATFORM=offscreen）
 // ════════════════════════════════════════════════════════════════════════
 #include "canvas/ShapeMeta.h"
+#include "core/CommandFactory.h"
 
 namespace ur { class CommandStack; }
 
@@ -16,8 +17,20 @@ namespace cd {
 
 class CanvasScene;
 
-// 把 demo 的可序列化命令注册进 ur::CommandFactory（main 与 selftest 共用）
-void registerDemoPayloads(CanvasScene* scene);
+// demo 侧的重建上下文：creator 需要的外部世界（这里是画布）挂在它上面。
+// core 只原样透传 CommandContext&，demo 用 dynamic_cast 认领——注册表因此
+// 不再需要捕获任何实例，可以在"场景还不存在"时就把类型注册好。
+class CanvasCommandContext : public ur::CommandContext
+{
+public:
+    explicit CanvasCommandContext(CanvasScene* s) : scene(s) {}
+    CanvasScene* scene;                 // 不持有；只需活过 fromPayload 调用
+};
+
+// 把 demo 的可序列化命令注册进 ur::CommandFactory（main 与 selftest 共用）。
+// 不接收 scene：注册的是"类型 → 怎么从 payload 重建"，重建时的场景由
+// fromPayload 的 ctx 参数给（A1 修正的正是"把注册表焊死在瞬时对象上"）。
+void registerDemoPayloads();
 
 // 无头电池入口：返回失败断言数（0 = 全绿）
 int runCanvasSelfTest();

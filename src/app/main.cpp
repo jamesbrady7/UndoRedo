@@ -4,7 +4,8 @@
 //   undoredo_demo.exe --selftest   offscreen 无头电池（退出码=失败数）
 //
 // 可序列化命令的工厂注册在应用装配层（SelfTest.cpp::registerDemoPayloads）：
-// 命令类型 -> creator 绑定场景指针收不透明 payload 文本，回放时按 id/快照重建。
+// 注册的是"类型名 → 从 payload 重建"的规则，重建时需要的场景由调用方通过
+// CommandContext 注入（不捕获实例），所以注册可以在任何场景创建之前完成。
 // ════════════════════════════════════════════════════════════════════════
 #include <QApplication>
 #include <QProcessEnvironment>
@@ -32,6 +33,7 @@ int main(int argc, char* argv[])
     if (selftest)
         return cd::runCanvasSelfTest();
 
+    cd::registerDemoPayloads();          // GUI 侧也把类型注册好（无实例依赖）
     cd::MainWindow w;
     w.show();
     return QApplication::exec();

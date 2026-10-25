@@ -44,32 +44,40 @@ int64_t fakeClock() { return g_fakeNow; }
 
 namespace cd {
 
-void registerDemoPayloads(CanvasScene* scene)
+void registerDemoPayloads()
 {
-    // creator 收不透明 payload 文本（core 侧约定）；JSON 解析在 demo 层完成
+    // creator 只认"类型 + 上下文"，不认实例：注册表可以在场景存在之前就绪，
+    // 也不会因为某个窗口销毁而留下悬垂捕获（见 CommandFactory.h 的 ★ 段）。
     ur::CommandFactory::instance().registerType("cd.addshape",
-        [scene](const std::string& data) {
-            return AddShapeCommand::fromPayload(scene, data);
+        [](const std::string& data, ur::CommandContext& ctx)
+            -> std::unique_ptr<ur::Command> {
+            auto* c = dynamic_cast<CanvasCommandContext*>(&ctx);
+            if (!c || !c->scene)
+                return nullptr;         // 上下文不对 = 优雅降级（同"未注册类型"）
+            return AddShapeCommand::fromPayload(c->scene, data);
         });
 }
 
 // ════════════════════════════════════════════════════════════════════════
 int runCanvasSelfTest()
 {
+    // 无缓冲：崩溃/断言失败时已打印的进度不会随缓冲一起丢掉（输出被重定向到
+    // 文件时 stdout 是块缓冲，abort 一次就能把整份日志吞掉，排障时最恨这个）。
+    setvbuf(stdout, nullptr, _IONBF, 0);
     printf("UndoRedoDemo canvas selftest —— demo 层集成电池(offscreen)\n");
     printf("(真实 MainWindow + 真实命令; 退出码 = 失败断言数)\n\n");
 
-    MainWindow w;                       // 不 show()；offscreen 平台下安全
-    CanvasScene* scene = w.scene();
-    ur::CommandStack* stack = w.stack();
+    auto w = std::make_unique<MainWindow>();   // 不 show()；offscreen 平台下安全
+    CanvasScene* scene = w->scene();
+    ur::CommandStack* stack = w->stack();
     stack->setClock(fakeClock);         // 假时钟：时间窗合并可确定性驱动
-    registerDemoPayloads(scene);
+    registerDemoPayloads();
 
     // ── S1 增删全遍历：undo 到底 → redo 回来，元数据逐一还原 ──
     printf("== S1 增/删全遍历 + 元数据还原 ==\n");
-    w.addShape(ShapeKind::Rect);
-    w.addShape(ShapeKind::Ellipse);
-    w.addShape(ShapeKind::Triangle);
+    w->addShape(ShapeKind::Rect);
+    w->addShape(ShapeKind::Ellipse);
+    w->addShape(ShapeKind::Triangle);
     checkOk(scene->shapeCount() == 3 && stack->count() == 3, "3 图形 3 历史(添加不合并)");
     QList<ShapeId> ids = scene->allIds();
     QHash<ShapeId, ShapeMeta> baseline;
@@ -124,7 +132,7 @@ int runCanvasSelfTest()
     // ── S3 选择快照：删除 → undo → 对象与选择集一起回来 ──
     printf("== S3 删除 undo: 原 id 重建 + 选择集恢复 ==\n");
     scene->selectIds({probe});
-    w.deleteSelected();
+    w->deleteSelected();
     checkOk(scene->shapeCount() == 2 && scene->findShape(probe) == nullptr, "删除生效");
     stack->undo();
     checkOk(scene->findShape(probe) != nullptr, "undo 按原 id 重建(老命令重放仍可达)");
@@ -143,7 +151,7 @@ int runCanvasSelfTest()
         scene->getMeta(id, &m);
         xsBefore.push_back(m.pos.x());
     }
-    w.alignLeft();
+    w->alignLeft();
     checkOk(stack->index() == idxS4 + 1 && stack->count() == idxS4 + 1,
             "多条移动折叠成一条事务历史(并按线性语义截断 redo 段)");
     qreal minX = 1e9;
@@ -222,7 +230,7 @@ int runCanvasSelfTest()
     // ── S7 历史遍历 + setIndex 任意跳转 ──
     printf("== S7 history() 遍历 + setIndex 跳转 ==\n");
     {
-        const std::vector<ur::CommandStack::Entry> h = stack->history();
+        const std::vector<ur::CommandStack::Entry>& h = stack->history();
         checkOk(int(h.size()) == stack->count(), "history() 与栈等长");
         bool entriesSane = !h.empty();
         for (const auto& e : h)
@@ -240,7 +248,7 @@ int runCanvasSelfTest()
     {
         stack->setClean();
         checkOk(stack->isClean(), "setClean 即 isClean");
-        w.addShape(ShapeKind::Rect);
+        w->addShape(ShapeKind::Rect);
         checkOk(!stack->isClean(), "新命令 -> dirty");
         stack->undo();
         checkOk(stack->isClean() && scene->shapeCount() == 3, "undo 回检查点 -> clean");
@@ -292,8 +300,14 @@ int runCanvasSelfTest()
             QString::fromUtf8(QJsonDocument(reparsed.value(QStringLiteral("data")).toObject())
                                   .toJson(QJsonDocument::Compact)).toStdString()
         };
-        auto rebuilt = ur::CommandFactory::instance().fromPayload(wire);
+        // 重建上下文：告诉 creator"这次回放落在哪个画布上"
+        CanvasCommandContext ctx(scene);
+        auto rebuilt = ur::CommandFactory::instance().fromPayload(wire, ctx);
         checkOk(rebuilt != nullptr, "工厂按类型名重建 AddShapeCommand");
+        // 反例：换成基类上下文（类型不匹配）→ 优雅降级为 nullptr，不崩
+        ur::CommandContext noCtx;
+        checkOk(ur::CommandFactory::instance().fromPayload(wire, noCtx) == nullptr,
+                "上下文类型不匹配: 返回 nullptr(与未注册类型同一条路)");
         const int cntBefore = stack->count();
         stack->push(std::move(rebuilt));
         checkOk(scene->shapeCount() == 3 && stack->count() == cntBefore + 1, "重建命令回放生效");
@@ -308,7 +322,28 @@ int runCanvasSelfTest()
         checkOk(scene->shapeCount() == 2, "重建命令的 undo 同样正确");
     }
 
+    // ── S11 选择集差量：同集合重复设置 = 零 selectionChanged ──
+    printf("== S11 selectIds 差量: 同集合重复设置不通知 ==\n");
+    {
+        const QList<ShapeId> keep = scene->allIds();
+        scene->selectIds(keep);                     // 先落到目标集合
+        int selSignals = 0;   // 注意: 不能叫 signals —— Qt 把它 #define 成 public
+        const auto conn = QObject::connect(scene, &QGraphicsScene::selectionChanged,
+                                           [&selSignals] { ++selSignals; });
+        scene->selectIds(keep);                     // 同一集合再来一次（undo/redo 恢复快照的常态）
+        checkOk(selSignals == 0, "同集合重复 selectIds: 零 selectionChanged(属性面板不白刷)");
+        scene->selectIds({keep.first()});           // 真的变了
+        checkOk(selSignals >= 1, "集合真的变化: 有通知");
+        // 故意保持"有选中"的状态退场：teardown 顺序错了就会在这里现形
+        scene->selectIds(keep);
+        QObject::disconnect(conn);
+    }
+
     printf("\n== 汇总: %d OK, %d FAIL ==\n", g_ok, g_fail);
+    // 显式先销毁窗口：把"UI/栈/场景的析构顺序"也纳入回归（崩溃会在这里现形，
+    // 而不是拖到进程退出的静态析构里，连日志都留不下）。
+    w.reset();
+    printf("== teardown: MainWindow 析构完成 ==\n");
     printf("== canvas selftest %s ==\n", g_fail == 0 ? "PASS" : "FAIL");
     return g_fail;
 }

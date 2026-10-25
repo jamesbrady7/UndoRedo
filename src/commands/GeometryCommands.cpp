@@ -5,6 +5,16 @@
 
 namespace cd {
 
+bool sameTargetSet(const QHash<ShapeId, QPointF>& a, const QHash<ShapeId, QPointF>& b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (auto it = a.cbegin(); it != a.cend(); ++it)
+        if (!b.contains(it.key()))
+            return false;
+    return true;
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // MoveShapesCommand
 // ════════════════════════════════════════════════════════════════════════
@@ -50,7 +60,7 @@ std::string MoveShapesCommand::mergeTag() const
 bool MoveShapesCommand::mergeWith(const ur::Command* next)
 {
     const auto* n = dynamic_cast<const MoveShapesCommand*>(next);
-    if (!n || n->from_.keys() != from_.keys())
+    if (!n || !sameTargetSet(n->from_, from_))
         return false;                       // 目标集合变了 → 拒绝（双保险）
     to_ = n->to_;                           // 只吸收终态；from_ 保持整段起点
     return true;

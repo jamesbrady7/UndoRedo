@@ -34,19 +34,36 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
     setWindowTitle(QStringLiteral("UndoRedoDemo —— 自研撤销/重做框架 · 画布编辑器"));
-    // 构造顺序 stack_ → bridge_ → buildUi()：面板装配时要拿到已存在的桥。
-    // 析构顺序由成员声明序保证（见 MainWindow.h 的 ★ 注释）。
-    stack_ = std::make_unique<ur::CommandStack>();
-    bridge_ = std::make_unique<ur::StackBridge>(stack_.get());  // 故意不挂 parent
+    // stackHost_ 的 stack/bridge 在成员初始化时已就位（析构序见 MainWindow.h）
     buildUi();
     wireStack();
     onCleanChanged(true);
     resize(1280, 800);
 }
 
-// 定义处 StackBridge/CommandStack 均完整（本文件已 include）——unique_ptr
-// 的 delete 在这里实例化。析构顺序 = 成员声明逆序：bridge_ 先于 stack_。
-MainWindow::~MainWindow() = default;
+// ★ 显式按依赖顺序拆 UI —— 不能交给 ~QObject 的"按构造序删子对象"。
+//   坑的实证：QGraphicsScene 析构时会清选择集并发 selectionChanged；若
+//   InspectorPanel 那时还活着，它的槽会回调一个【半销毁】的场景，Debug 下
+//   必现访问违例（复现条件：退出时有图形被选中 —— 真实用户关窗就会踩到）。
+//   顺序：view（裸持 scene）→ 两个面板（用 scene/stack）→ scene；
+//   之后才轮到成员 stackHost_（bridge 先于 stack，由 StackHost 保证）。
+MainWindow::~MainWindow()
+{
+    if (QWidget* central = takeCentralWidget())    // 中央控件 = view_
+        delete central;
+    view_ = nullptr;
+
+    // 面板挂在 QDockWidget 里：连 dock 一起删，避免留下空壳 dock
+    if (QWidget* dock = inspector_ ? inspector_->parentWidget() : nullptr)
+        delete dock;
+    inspector_ = nullptr;
+    if (QWidget* dock = historyDock_ ? historyDock_->parentWidget() : nullptr)
+        delete dock;
+    historyDock_ = nullptr;
+
+    delete scene_;                                 // 此时已无监听者
+    scene_ = nullptr;
+}
 
 // ── UI 装配 ─────────────────────────────────────────────────────────────
 void MainWindow::buildUi()
@@ -70,7 +87,10 @@ void MainWindow::buildUi()
     auto* delAct = tb->addAction(QStringLiteral("删除"));
     delAct->setShortcut(QKeySequence::Delete);
     connect(delAct, &QAction::triggered, this, &MainWindow::deleteSelected);
-    connect(view_, &CanvasView::deleteRequested, this, &MainWindow::deleteSelected);
+    // 注：Delete 只走这条 QAction 快捷键。CanvasView 里曾有一份 keyPressEvent
+    // 兜底（emit deleteRequested），但 QAction 的 WindowShortcut 会先截获按键，
+    // 视图根本收不到 —— 那条路径永远走不到，属于会让人误判"两处都在管"的
+    // 死代码，已删除。快捷键入口只有一处，删除逻辑只有 deleteSelected 一处。
     tb->addSeparator();
 
     auto* frontAct = tb->addAction(QStringLiteral("置顶"));
@@ -108,8 +128,8 @@ void MainWindow::buildUi()
     redoAct_->setEnabled(false);
 
     // 右侧 dock：属性面板 + 历史面板（tab 化；面板是 QWidget，需包 QDockWidget）
-    inspector_ = new InspectorPanel(scene_, stack_.get(), this);
-    historyDock_ = new HistoryDock(stack_.get(), bridge_.get(), this);
+    inspector_ = new InspectorPanel(scene_, &stackHost_.stack, this);
+    historyDock_ = new HistoryDock(&stackHost_.stack, &stackHost_.bridge, this);
     auto* inspDock = new QDockWidget(QStringLiteral("属性"), this);
     inspDock->setWidget(inspector_);
     auto* histDock = new QDockWidget(QStringLiteral("历史"), this);
@@ -128,13 +148,13 @@ void MainWindow::buildUi()
 // ── 栈接线（框架机制与编辑器域的唯一交汇点）─────────────────────────────
 void MainWindow::wireStack()
 {
-    stack_->setMergePolicy(std::make_unique<ur::TimeWindowMergePolicy>(500));
+    stackHost_.stack.setMergePolicy(std::make_unique<ur::TimeWindowMergePolicy>(500));
 
     // 选择集自动快照：push 前后各盖一次章，undo/redo 时由 applier 恢复
-    stack_->setSelectionProvider([this] {
+    stackHost_.stack.setSelectionProvider([this] {
         return ur::SelectionMemento::fromSeq(scene_->selectedIds());
     });
-    stack_->setSelectionApplier([this](const ur::SelectionMemento& m) {
+    stackHost_.stack.setSelectionApplier([this](const ur::SelectionMemento& m) {
         QList<ShapeId> ids;
         ids.reserve(int(m.ids.size()));
         for (uint64_t id : m.ids)
@@ -144,14 +164,14 @@ void MainWindow::wireStack()
 
     // 最小通知面：core 的 Observer 回调经 StackBridge 重发为 indexChanged
     // 一个 Qt 信号，驱动 action 文本/可用态刷新
-    connect(bridge_.get(), &ur::StackBridge::indexChanged, this, &MainWindow::onIndexChanged);
-    connect(bridge_.get(), &ur::StackBridge::cleanChanged, this, &MainWindow::onCleanChanged);
+    connect(&stackHost_.bridge, &ur::StackBridge::indexChanged, this, &MainWindow::onIndexChanged);
+    connect(&stackHost_.bridge, &ur::StackBridge::cleanChanged, this, &MainWindow::onCleanChanged);
     // stack 不再是 QObject，不能当 connect 的接收者 context——用 this
     //（返回值丢弃，同旧版把 &CommandStack::undo 当槽连接的语义）
-    connect(undoAct_, &QAction::triggered, this, [this] { stack_->undo(); });
-    connect(redoAct_, &QAction::triggered, this, [this] { stack_->redo(); });
+    connect(undoAct_, &QAction::triggered, this, [this] { stackHost_.stack.undo(); });
+    connect(redoAct_, &QAction::triggered, this, [this] { stackHost_.stack.redo(); });
 
-    view_->setCommandStack(stack_.get());
+    view_->setCommandStack(&stackHost_.stack);
     onIndexChanged(0);
 }
 
@@ -168,7 +188,7 @@ void MainWindow::addShape(ShapeKind kind)
     else if (kind == ShapeKind::Triangle)
         m.size = QSizeF(110, 95);
     m.z = scene_->nextTopZ();
-    stack_->push(std::make_unique<AddShapeCommand>(scene_, m));
+    stackHost_.stack.push(std::make_unique<AddShapeCommand>(scene_, m));
 }
 
 QPointF MainWindow::nextSpawnPos() const
@@ -185,21 +205,21 @@ void MainWindow::deleteSelected()
         statusBar()->showMessage(QStringLiteral("没有选中图形可删除"), 2000);
         return;
     }
-    stack_->push(std::make_unique<RemoveShapesCommand>(scene_, ids));
+    stackHost_.stack.push(std::make_unique<RemoveShapesCommand>(scene_, ids));
 }
 
 void MainWindow::bringToFront()
 {
     const QList<ShapeId> ids = scene_->selectedIds();
     if (!ids.isEmpty())
-        stack_->push(std::make_unique<ReorderZCommand>(scene_, ids, true));
+        stackHost_.stack.push(std::make_unique<ReorderZCommand>(scene_, ids, true));
 }
 
 void MainWindow::sendToBack()
 {
     const QList<ShapeId> ids = scene_->selectedIds();
     if (!ids.isEmpty())
-        stack_->push(std::make_unique<ReorderZCommand>(scene_, ids, false));
+        stackHost_.stack.push(std::make_unique<ReorderZCommand>(scene_, ids, false));
 }
 
 void MainWindow::groupSelected()
@@ -209,7 +229,7 @@ void MainWindow::groupSelected()
         statusBar()->showMessage(QStringLiteral("成组需要选中至少 2 个图形"), 2000);
         return;
     }
-    stack_->push(std::make_unique<SetGroupCommand>(scene_, ids, scene_->nextGroupId()));
+    stackHost_.stack.push(std::make_unique<SetGroupCommand>(scene_, ids, scene_->nextGroupId()));
 }
 
 void MainWindow::ungroupSelected()
@@ -217,7 +237,7 @@ void MainWindow::ungroupSelected()
     const QList<ShapeId> ids = scene_->selectedIds();
     if (ids.isEmpty())
         return;
-    stack_->push(std::make_unique<SetGroupCommand>(scene_, ids, 0));
+    stackHost_.stack.push(std::make_unique<SetGroupCommand>(scene_, ids, 0));
 }
 
 // ── 事务演示：多条移动命令 → 一条 Compound 历史 ─────────────────────────
@@ -234,14 +254,14 @@ void MainWindow::alignLeft()
         if (scene_->getMeta(id, &m))
             minX = qMin(minX, m.pos.x());
     }
-    ur::TransactionScope tx(stack_.get(), "左对齐");
+    ur::TransactionScope tx(&stackHost_.stack, "左对齐");
     for (ShapeId id : ids) {
         ShapeMeta m;
-        if (!scene_->getMeta(id, &m) || qFuzzyCompare(m.pos.x(), minX))
+        if (!scene_->getMeta(id, &m) || fuzzyEqual(m.pos.x(), minX))
             continue;                               // 已在目标位的跳过（空事务防线）
         QHash<ShapeId, QPointF> from{{id, m.pos}};
         QHash<ShapeId, QPointF> to{{id, QPointF(minX, m.pos.y())}};
-        stack_->push(std::make_unique<MoveShapesCommand>(scene_, from, to, 0));
+        stackHost_.stack.push(std::make_unique<MoveShapesCommand>(scene_, from, to, 0));
     }
     tx.commit();                                    // 析构结算：≥2 条 → 一条 Compound
 }
@@ -270,16 +290,16 @@ void MainWindow::distributeH()
     const qreal lastCx = items.last().second.pos.x() + items.last().second.size.width() / 2;
     const qreal step = (lastCx - firstCx) / qreal(items.size() - 1);
 
-    ur::TransactionScope tx(stack_.get(), "横向分布");
+    ur::TransactionScope tx(&stackHost_.stack, "横向分布");
     for (int i = 0; i < items.size(); ++i) {
         const ShapeId id = items[i].first;
         const ShapeMeta& m = items[i].second;
         const qreal newX = firstCx + step * i - m.size.width() / 2;
-        if (qFuzzyCompare(newX + 1.0, m.pos.x() + 1.0))
+        if (fuzzyEqual(newX, m.pos.x()))
             continue;                               // 已在目标位的跳过
         QHash<ShapeId, QPointF> from{{id, m.pos}};
         QHash<ShapeId, QPointF> to{{id, QPointF(newX, m.pos.y())}};
-        stack_->push(std::make_unique<MoveShapesCommand>(scene_, from, to, 0));
+        stackHost_.stack.push(std::make_unique<MoveShapesCommand>(scene_, from, to, 0));
     }
     tx.commit();
 }
@@ -291,16 +311,16 @@ void MainWindow::selectAll()
 
 void MainWindow::onSave()
 {
-    stack_->setClean();                             // demo 语义：保存 = 记检查点
+    stackHost_.stack.setClean();                             // demo 语义：保存 = 记检查点
     statusBar()->showMessage(QStringLiteral("已保存（clean 检查点已记录在当前历史位置）"), 3000);
 }
 
 // ── 信号槽：最小通知面 → 全部 UI 刷新 ───────────────────────────────────
 void MainWindow::onIndexChanged(int index)
 {
-    const std::vector<ur::CommandStack::Entry> h = stack_->history();
-    undoAct_->setEnabled(stack_->canUndo());
-    redoAct_->setEnabled(stack_->canRedo());
+    const std::vector<ur::CommandStack::Entry>& h = stackHost_.stack.history();   // 引用：不复制整张表
+    undoAct_->setEnabled(stackHost_.stack.canUndo());
+    redoAct_->setEnabled(stackHost_.stack.canRedo());
     // Entry.text 是 UTF-8 std::string → 上 UI 统一 fromStdString（边界纪律）
     undoAct_->setText(index > 0 && index - 1 < int(h.size())
                       ? QStringLiteral("撤销 %1").arg(QString::fromStdString(h[size_t(index - 1)].text))

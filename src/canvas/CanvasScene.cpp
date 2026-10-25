@@ -1,6 +1,7 @@
 #include "canvas/CanvasScene.h"
 
 #include <QPainter>
+#include <QSet>
 #include <algorithm>
 #include "canvas/ShapeItem.h"
 
@@ -121,10 +122,25 @@ QList<ShapeId> CanvasScene::selectedIds() const
 
 void CanvasScene::selectIds(const QList<ShapeId>& ids)
 {
-    clearSelection();
-    for (ShapeId id : ids) {
+    // 差量更新：只翻转"状态真的变了"的 item。
+    // 旧实现无条件 clearSelection() + 全量 setSelected(true)：即使选择集
+    // 完全没变（undo/redo 恢复快照时很常见），也会把整块画布标脏重绘，
+    // 并触发一次 selectionChanged → 属性面板白刷一遍。
+    // 现在"同集合重复设置"是严格零副作用（selftest S11 盯着这条）。
+    QSet<ShapeId> want;
+    want.reserve(ids.size());
+    for (ShapeId id : ids)
+        want.insert(id);
+
+    for (ShapeId id : selectedIds()) {          // 先摘掉不在目标集合里的
+        if (!want.contains(id))
+            if (ShapeItem* item = findShape(id))
+                item->setSelected(false);
+    }
+    for (ShapeId id : ids) {                    // 再补上还没选中的
         if (ShapeItem* item = findShape(id))
-            item->setSelected(true);    // 找不到的 id 静默跳过（对象可能已删）
+            if (!item->isSelected())
+                item->setSelected(true);        // 找不到的 id 静默跳过（对象可能已删）
     }
 }
 

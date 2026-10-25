@@ -26,15 +26,11 @@ public:
     explicit CanvasView(CanvasScene* scene, QWidget* parent = nullptr);
     void setCommandStack(ur::CommandStack* stack) { stack_ = stack; }
 
-signals:
-    void deleteRequested();             // Delete 键 → MainWindow 走命令删除
-
 protected:
     void mousePressEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
     void mouseReleaseEvent(QMouseEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
-    void keyPressEvent(QKeyEvent* e) override;
 
 private:
     enum class Gesture { None, Move, Resize, Pan };

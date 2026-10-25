@@ -12,13 +12,11 @@
 //   · 对齐/分布用 TransactionScope                —— 多命令事务演示
 // ════════════════════════════════════════════════════════════════════════
 #include <QMainWindow>
-#include <memory>
+#include "app/StackBridge.h"        // StackHost（值成员，需要完整类型）
 #include "canvas/ShapeMeta.h"
 
 class QAction;
 class QLabel;
-
-namespace ur { class CommandStack; class StackBridge; }
 
 namespace cd {
 
@@ -32,13 +30,13 @@ class MainWindow : public QMainWindow
     Q_OBJECT
 public:
     explicit MainWindow(QWidget* parent = nullptr);
-    // 出线析构：stack_/bridge_ 是 unique_ptr<前置声明类型>，隐式析构会在
-    // 每个使用点实例化 delete（SelfTest.cpp 没 include StackBridge.h → C2027）。
+    // 出线析构：显式按依赖顺序拆 UI（view → 面板 → scene），理由见 .cpp
     ~MainWindow() override;
 
-    // selftest 无头电池的驱动入口
+    // selftest 无头电池的驱动入口（非 const：栈是可写对象，const 成员函数
+    // 里 &stackHost_.stack 会退化成 const 指针）
     CanvasScene* scene() const { return scene_; }
-    ur::CommandStack* stack() const { return stack_.get(); }
+    ur::CommandStack* stack() { return &stackHost_.stack; }
 
 public slots:
     void addShape(ShapeKind kind);
@@ -63,12 +61,10 @@ private:
 
     CanvasScene* scene_ = nullptr;
     CanvasView* view_ = nullptr;
-    // ★ 声明顺序 = 析构契约：成员按声明逆序析构，bridge_ 在 stack_ 之后
-    //   声明 → bridge_ 先死（析构里 removeObserver 踩活 stack）→ stack_ 后死。
-    //   bridge_ 绝不挂 QObject parent（parent 化会推迟到 ~QObject 阶段，晚于
-    //   unique_ptr 成员 → UAF）。谁调换这两行，退出时就是堆损坏。
-    std::unique_ptr<ur::CommandStack> stack_;
-    std::unique_ptr<ur::StackBridge> bridge_;
+    // ★ stack 与 bridge 装在一个复合体里：声明序 stack → bridge，析构逆序
+    //   bridge → stack，"bridge 必须先于 stack 死"由编译器保证（StackBridge.h）。
+    //   bridge 绝不挂 QObject parent（parent 化会推迟到 ~QObject 阶段 → UAF）。
+    ur::StackHost stackHost_;
     InspectorPanel* inspector_ = nullptr;
     HistoryDock* historyDock_ = nullptr;
 

@@ -24,6 +24,12 @@ namespace cd {
 
 class CanvasScene;
 
+// 目标集合相等（顺序无关）：合并前必须确认"两条命令作用在同一批 id 上"。
+// 用 size + 逐 key 查表，不构造 QList（旧版 `a.keys() != b.keys()` 每次都
+// 分配两个列表，而且比较结果依赖 QHash 迭代序——同一批 key 因插入顺序不同
+// 就可能判不等，合并时灵时不灵）。
+bool sameTargetSet(const QHash<ShapeId, QPointF>& a, const QHash<ShapeId, QPointF>& b);
+
 class MoveShapesCommand : public ur::Command
 {
 public:
@@ -37,6 +43,9 @@ public:
     int  id() const override { return kCdMove; }
     std::string text() const override;
     std::string mergeTag() const override;
+    // 手势号 >0 是【显式会话边界】：一次拖拽内部的 push 无论间隔多久都必须
+    // 合并（用户拖着不放 ≠ 两次操作），时间窗不该在这里插嘴（T17）。
+    bool mergeTagHasSession() const override { return gestureId_ > 0; }
     bool mergeWith(const ur::Command* next) override;
     int64_t estimatedMemory() const override;
     ur::ContextSet contexts() const override;
@@ -60,6 +69,7 @@ public:
     int  id() const override { return kCdResize; }
     std::string text() const override;
     std::string mergeTag() const override;
+    bool mergeTagHasSession() const override { return gestureId_ > 0; }
     bool mergeWith(const ur::Command* next) override;
     int64_t estimatedMemory() const override;
     ur::ContextSet contexts() const override;

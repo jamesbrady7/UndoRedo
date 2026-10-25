@@ -186,7 +186,7 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e)
     QGraphicsView::mouseReleaseEvent(e);
 }
 
-// ── 滚轮缩放 / Delete 键 ───────────────────────────────────────────────
+// ── 滚轮缩放 ───────────────────────────────────────────────────────────
 void CanvasView::wheelEvent(QWheelEvent* e)
 {
     const double factor = e->angleDelta().y() > 0 ? 1.15 : 1.0 / 1.15;
@@ -197,14 +197,8 @@ void CanvasView::wheelEvent(QWheelEvent* e)
     e->accept();
 }
 
-void CanvasView::keyPressEvent(QKeyEvent* e)
-{
-    if (e->key() == Qt::Key_Delete || e->key() == Qt::Key_Backspace) {
-        emit deleteRequested();
-        e->accept();
-        return;
-    }
-    QGraphicsView::keyPressEvent(e);                // Ctrl+Z/Y 由 QAction 快捷键接管
-}
+// Delete / Ctrl+Z / Ctrl+Y 全部由 MainWindow 的 QAction 快捷键接管
+// （WindowShortcut 优先于视图按键），视图不再重复处理——见 MainWindow.cpp
+// buildUi 里"删除"action 处的注释。
 
 } // namespace cd
