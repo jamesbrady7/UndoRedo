@@ -21,10 +21,10 @@ using ShapeId = quint64;    // 0 = 无效 id
 
 // 0 安全的浮点等价判定。qFuzzyCompare 的实现是
 //   |a-b| <= eps * min(|a|,|b|)
-// 所以任一侧为 0（或两者都是 0）时几乎永远判不等：qFuzzyCompare(0, 1e-300)
-// 是 false，qFuzzyCompare(0, 0) 也是 false。平移 +1 是业界惯用规避（坐标/
-// 尺寸的绝对量级远大于 eps）。集中一处，免得每个调用点各写一遍还写错——
-// 本项目就曾在对齐/分布/断言里各写过一种版本。
+// 所以任一侧为 0 时几乎永远判不等（qFuzzyCompare(0, 1e-300) 是 false），
+// 坐标/尺寸里 0 又太常见（原点、零宽度）。平移 +1 是业界惯用规避：绝对量级
+// 远大于 eps 时等价于"相对误差判定"。集中一处，免得每个调用点各写一遍还
+// 写错——本项目就曾在对齐/分布/断言里各写过一种版本。
 inline bool fuzzyEqual(qreal a, qreal b)
 {
     return qFuzzyCompare(a + 1.0, b + 1.0);

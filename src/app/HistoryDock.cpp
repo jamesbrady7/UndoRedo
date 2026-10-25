@@ -71,6 +71,14 @@ HistoryDock::HistoryDock(ur::CommandStack* stack, ur::StackBridge* bridge, QWidg
 
     undoInsp_ = new QPushButton(QStringLiteral("只撤销一步属性改动 (undoIn inspector)"), this);
     undoCanvas_ = new QPushButton(QStringLiteral("只撤销一步画布改动 (undoIn canvas)"), this);
+    // 文案必须说清这是"改写历史"而不是"挖个洞"：该步会从历史里消失，
+    // 原有的重做分支也一并作废（与 push 同规则）——否则用户会以为还能 redo 回来。
+    undoInsp_->setToolTip(QStringLiteral(
+        "向前找到最近一条属性命令：撤销它、重放它上方的命令，再把它从历史中移除。\n"
+        "该步不可再重做；若有重做分支会一并丢弃（改历史 = 原来的未来不再成立）。"));
+    undoCanvas_->setToolTip(QStringLiteral(
+        "向前找到最近一条画布命令：撤销它、重放它上方的命令，再把它从历史中移除。\n"
+        "该步不可再重做；若有重做分支会一并丢弃（改历史 = 原来的未来不再成立）。"));
     connect(undoInsp_, &QPushButton::clicked, this, &HistoryDock::onUndoInspector);
     connect(undoCanvas_, &QPushButton::clicked, this, &HistoryDock::onUndoCanvas);
     root->addWidget(undoInsp_);

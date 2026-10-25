@@ -8,7 +8,8 @@
 //  2. 双预算截断：条数上限 + 字节预算，超限从栈底弹（Krita/Blender 经验）
 //  3. 最小通知面：onIndexChanged 为主回调；setIndex 跨 N 步只发一次
 //     （Qt 的 canUndoChanged/undoTextChanged/indexChanged 多信号风暴）
-//  4. undoIn(ctx)：Eclipse IUndoContext 式子序列撤销（向前搜索 + 上层重放）
+//  4. undoIn(ctx)：Eclipse IUndoContext 式子序列撤销（向前搜索 + 上层重放
+//     + 从历史移除该步）
 //  5. 合并策略可插拔（setMergePolicy），且时间戳来自可注入时钟（可测性）
 //  6. 宏是 RAII 的（TransactionScope 包装 beginMacro/endMacro），
 //     支持 abort 逆序回滚与空事务自动丢弃
@@ -16,14 +17,15 @@
 // 所有权：栈接管 push 进来的命令（unique_ptr），clear()/析构时释放。
 // 线程模型：单线程（GUI 线程），与 QUndoStack 相同；不做锁。
 //
-// ★ applied_ 位图（与 cmds_ 严格平行）：每条命令"此刻是否真的生效"。
-//   正常线性历史里它恒等于 [0,index_) 全 1、其余全 0；undoIn() 会把某条
-//   单独置 0（游标不动），于是"已执行区"里出现一个空洞。undo/redo 步进
-//   因此必须查这个位图：
-//     · 已经是 0 的命令，线性 undo 不再调 undo()（否则就是【撤销两次】，
-//       相对增量式命令会当场算错——这是旧版用单向 neutralized_ 标记时的真 bug）
-//     · 线性 redo 会把它重新置 1（Ctrl+Z 后再 Ctrl+Y 应回到原状态）
-//   推论：canUndo() 只表示"游标左侧还有历史"，不代表"按下去一定有效果"。
+// ★ 一条不变量：**状态 == 前 index_ 条命令按序重放的结果**。
+//   历史面板把行渲染成"状态"（row j = 执行完前 j 条），点击即 setIndex(j)，
+//   所以这条不变量是 UI 可信的前提。undoIn(ctx) 因此被定义为【改写历史】：
+//   撤掉目标命令的效果 → 重放它上方的命令 → **把该条从 entries_/cmds_ 里删掉**，
+//   游标随之左移。代价：该步不能再 redo 回来，原 redo 分支也一并作废
+//   （改历史 = 原来的未来不再成立，与 push 同规则；详见设计精讲 §8.2）。
+//   曾经的"挖除但保留历史 + 位图标记"方案会让状态不再等于任何前缀，
+//   点击历史行必然对不上（"游标不动"在只有命令列表、没有状态快照的模型里
+//   无法表达"当前是哪个状态"）——这是实测后放弃的方案，别退回去。
 //
 // 纯 C++17 零依赖：不继承 QObject，通知走内嵌 Observer 接口（Qt 侧
 // 由 demo 层的 StackBridge 把回调重发为信号）。Observer 三条纪律：
@@ -86,14 +88,19 @@ public:
     bool undo();
     bool redo();
 
-    // ── Eclipse 式 context 过滤撤销（子序列 undo，游标不动）────────
-    // 从 index_-1 向前搜索首条"仍生效且 contexts 与 ctx 相交"的命令，
-    // 只撤它一条（applied=false），再把它上方、游标下方仍生效的命令升序
-    // 重放一遍——因为那条命令的 undo 可能覆盖掉上层命令对同一目标的写入
-    // （例如 B 把 X 移到 10、C 再把 X 移到 20；撤掉 B 会把 X 拽回 0，
-    // 必须重放 C 才能让"画布通道的净效果不变"）。重放安全的前提就是
-    // Command.h 的 redo 幂等纪律。
-    // ctx 为空等价于普通 undo()。代价与边界如实声明于设计精讲 §8。
+    // ── context 过滤撤销（Eclipse 式子序列 undo，但【改写历史】）────
+    // 从 index_-1 向前搜索首条 contexts 与 ctx 相交的命令 k：
+    //   ① 撤掉 k 的效果；
+    //   ② 把 k 上方、游标下方的命令升序重放一遍（k 的 undo 可能覆盖掉上层
+    //      对同一目标的写入：B 把 X 移到 10、C 再移到 20，撤 B 会把 X 拽回 0，
+    //      必须重放 C 才能让"其它通道的净效果不变"；安全前提是 redo 幂等）；
+    //   ③ 把 k 从历史里删掉，index_ 左移一位；redo 段一并作废（改历史 =
+    //      原来的"未来"不再成立，与 push 同规则）。
+    // 为什么删而不是标记：历史面板的行 = 状态，点击行必须精确复现该状态
+    // （不变量见文件头）。代价：该步不能再 redo 回来（§8.2 如实声明）。
+    // 前提：命令只写自己通道的字段（demo 的 Move 只写坐标、SetFill 只写颜色）。
+    // 否则移除中间步会让上方命令的基线快照失真——这是本机制的真实边界。
+    // ctx 为空等价于普通 undo()。
     bool canUndoIn(const ContextSet& ctx) const;
     bool undoIn(const ContextSet& ctx);
 
@@ -155,10 +162,6 @@ private:
 
     std::vector<std::unique_ptr<Command>> cmds_;    // 活动命令（所有权）
     std::vector<Entry> entries_;                    // 与 cmds_ 严格平行
-    // 与 cmds_ 严格平行：每条命令此刻是否真的生效（1=生效，0=被 undoIn 挖掉）。
-    // 语义与不变量见文件头 ★ 段。绝不能退化成"单向中和标记"——那样线性 undo
-    // 会把同一条命令撤两次。
-    std::vector<char> applied_;
     int    index_ = 0;                              // 游标：已执行命令数
     int64_t totalBytes_ = 0;
     int    cleanIndex_ = -1;                        // -1 = 无检查点/已丢失

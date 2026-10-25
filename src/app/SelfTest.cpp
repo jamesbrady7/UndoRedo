@@ -44,6 +44,30 @@ int64_t fakeClock() { return g_fakeNow; }
 
 namespace cd {
 
+namespace {
+// 场景指纹：所有图形的完整状态拼成一条字符串。用来验证"历史行 = 状态"——
+// 同一行来回跳两次必须得到逐字节相同的结果，否则就是基线快照失真。
+QString sceneDigest(CanvasScene* scene)
+{
+    QString s;
+    for (ShapeId id : scene->allIds()) {
+        ShapeMeta m;
+        if (!scene->getMeta(id, &m)) {
+            s += QStringLiteral("#%1:missing;").arg(id);
+            continue;
+        }
+        s += QStringLiteral("%1:%2,%3,%4,%5,%6,%7,%8,%9,%10,%11;")
+                 .arg(id)
+                 .arg(m.pos.x()).arg(m.pos.y())
+                 .arg(m.size.width()).arg(m.size.height())
+                 .arg(m.fill.name()).arg(m.stroke.name())
+                 .arg(m.strokeWidth).arg(m.z).arg(m.groupId)
+                 .arg(m.name);
+    }
+    return s;
+}
+} // namespace
+
 void registerDemoPayloads()
 {
     // creator 只认"类型 + 上下文"，不认实例：注册表可以在场景存在之前就绪，
@@ -219,12 +243,14 @@ int runCanvasSelfTest()
             QHash<ShapeId, QPointF>{{probe, posAfterMove + QPointF(3, 0)}}, 89));
 
         const int idxBefore = stack->index();
+        const int cntBefore = stack->count();
         checkOk(stack->undoIn({ur::kCtxInspector}), "undoIn(inspector) 命中");
         ShapeMeta m1;
         scene->getMeta(probe, &m1);
         checkOk(m1.fill == fill0, "填充色回滚到改动前");
         checkOk(m1.pos == posAfterMove + QPointF(3, 0), "画布通道净效果不变(重放)");
-        checkOk(stack->index() == idxBefore, "游标不动(线性历史完好)");
+        checkOk(stack->index() == idxBefore - 1 && stack->count() == cntBefore - 1,
+                "该步从历史移除, 游标左移(面板高亮=状态)");
     }
 
     // ── S7 历史遍历 + setIndex 任意跳转 ──
@@ -337,6 +363,45 @@ int runCanvasSelfTest()
         // 故意保持"有选中"的状态退场：teardown 顺序错了就会在这里现形
         scene->selectIds(keep);
         QObject::disconnect(conn);
+    }
+
+    // ── S12 移除中间步之后：历史行 = 状态（点击哪行就精确回到哪行）──
+    printf("== S12 undoIn 之后逐行跳转: 行 == 状态 ==\n");
+    {
+        const QList<ShapeId> ids = scene->allIds();
+        checkOk(ids.size() >= 2, "场景里有可操作对象");
+        const ShapeId a = ids.at(0);
+        ShapeMeta m0;
+        scene->getMeta(a, &m0);
+        QPointF p = m0.pos;
+        QColor c = m0.fill;
+        for (int i = 0; i < 2; ++i) {
+            stack->push(std::make_unique<MoveShapesCommand>(
+                scene, QHash<ShapeId, QPointF>{{a, p}},
+                QHash<ShapeId, QPointF>{{a, p + QPointF(5, 0)}}, 90 + i));
+            p += QPointF(5, 0);
+            const QColor next = QColor::fromHsv((i * 90 + 30) % 360, 200, 220);
+            stack->push(std::make_unique<SetFillCommand>(
+                scene, QList<ShapeId>{a}, QHash<ShapeId, QColor>{{a, c}}, next));
+            c = next;
+        }
+        const int idx = stack->index();
+        const int cnt = stack->count();
+        checkOk(stack->undoIn({ur::kCtxInspector}), "第 1 次 undoIn(inspector)");
+        checkOk(stack->undoIn({ur::kCtxInspector}), "第 2 次 undoIn(inspector)");
+        checkOk(stack->count() == cnt - 2 && stack->index() == idx - 2,
+                "两条属性命令被移除, 游标同步左移(面板高亮 = 状态)");
+        const QString here = sceneDigest(scene);
+        int badRow = -1;
+        for (int j = 0; j <= stack->count(); ++j) {
+            stack->setIndex(j);
+            const QString once = sceneDigest(scene);
+            stack->setIndex(0);                     // 回到起点再重放，清掉"残留"
+            stack->setIndex(j);
+            if (sceneDigest(scene) != once) { badRow = j; break; }
+        }
+        checkOk(badRow < 0, "每一行都能被精确复现(来回跳状态逐字节一致)");
+        checkOk(sceneDigest(scene) == here, "停在当前行: 与 undoIn 刚结束时的状态一致");
     }
 
     printf("\n== 汇总: %d OK, %d FAIL ==\n", g_ok, g_fail);

@@ -105,7 +105,6 @@ void CommandStack::push(std::unique_ptr<Command> cmd)
     cmds_.push_back(std::move(cmd));
     Entry e = makeEntry(cmds_.back().get(), now);   // ⑦ 元数据在此冻结
     entries_.push_back(e);
-    applied_.push_back(1);              // 新命令一定处于生效态
     index_ = int(cmds_.size());
     totalBytes_ += e.bytes;
     trimBudgetQuiet();                  // ⑧ 双预算从栈底裁剪
@@ -140,12 +139,7 @@ void CommandStack::stepUndoInternal(bool applySel)
 {
     --index_;
     Command* c = cmds_[size_t(index_)].get();
-    // 只有"仍生效"的命令才调 undo()。被 undoIn 挖掉的那条已经是 0，
-    // 再撤一次就是重复撤销（相对增量式命令会当场算错，见文件头 ★ 段）。
-    if (applied_[size_t(index_)]) {
-        c->undo();
-        applied_[size_t(index_)] = 0;
-    }
+    c->undo();
     if (applySel)
         applySelection(c->selBefore);
 }
@@ -153,25 +147,19 @@ void CommandStack::stepUndoInternal(bool applySel)
 void CommandStack::stepRedoInternal(bool applySel)
 {
     Command* c = cmds_[size_t(index_)].get();
-    // 反向同理：已经是生效态的不重放（否则相对增量命令会被放大）。
-    // 线性 redo 会复活被 undoIn 挖掉的命令——Ctrl+Z 之后 Ctrl+Y 应当
-    // 回到按 Ctrl+Z 之前的样子，这是用户对"线性历史"的基本预期。
-    if (!applied_[size_t(index_)]) {
-        c->redo();
-        applied_[size_t(index_)] = 1;
-    }
+    c->redo();
     ++index_;
     if (applySel)
         applySelection(c->selAfter);
 }
 
-// ── context 过滤撤销（Eclipse 式向前搜索 + 上层重放）───────────────────
+// ── context 过滤撤销（向前搜索 + 上层重放 + 从历史移除）─────────────────
 bool CommandStack::canUndoIn(const ContextSet& ctx) const
 {
     if (ctx.empty())
         return canUndo();
     for (int i = index_ - 1; i >= 0; --i) {
-        if (applied_[size_t(i)] && contextIntersects(entries_[size_t(i)].contexts, ctx))
+        if (contextIntersects(entries_[size_t(i)].contexts, ctx))
             return true;
     }
     return false;
@@ -182,8 +170,8 @@ bool CommandStack::undoIn(const ContextSet& ctx)
     if (ctx.empty())
         return undo();
     int k = -1;
-    for (int i = index_ - 1; i >= 0; --i) {     // 向前搜索首条命中（跳过已挖掉的）
-        if (applied_[size_t(i)] && contextIntersects(entries_[size_t(i)].contexts, ctx)) {
+    for (int i = index_ - 1; i >= 0; --i) {
+        if (contextIntersects(entries_[size_t(i)].contexts, ctx)) {
             k = i;
             break;
         }
@@ -191,29 +179,43 @@ bool CommandStack::undoIn(const ContextSet& ctx)
     if (k < 0)
         return false;
 
-    // 演示语义（设计精讲 §8 如实声明代价）：
-    //   undo 目标命令 → 把它上方、游标下方的【仍生效】命令升序重放。
-    //   游标不动、历史形状不变，净效果 = 精准挖掉 k 的效果。
-    //   为什么要重放：k 的 undo 可能覆盖掉上层命令对同一目标的写入
-    //   （B 把 X 移到 10、C 把 X 移到 20；撤 B 会把 X 拽回初态，必须
-    //   重放 C 才能让"画布通道净效果不变"）。重放安全的唯一前提是
-    //   Command.h 的 redo 幂等纪律。
-    //   为什么只撤 k 一条（而不是先撤到 k 再重放）：那样会无谓地动到
-    //   其它命令，且在"目标已被删"的场景多制造 no-op 噪声。
-    //   k 被置 applied=false：不再被子序列搜索命中；线性 undo 走到它时
-    //   会跳过（不会撤第二次），线性 redo 会把它复活。
+    // 语义：精准撤掉 k 的效果，并把这一步【从历史里删掉】（游标左移）。
+    //   · 先撤 k，再把它上方的命令升序重放：k 的 undo 可能覆盖掉上层对
+    //     同一目标的写入（B 把 X 移到 10、C 再移到 20；撤 B 会把 X 拽回 0，
+    //     必须重放 C 才能让"其它通道的净效果不变"）。重放安全的唯一前提
+    //     是 Command.h 的 redo 幂等纪律。
+    //   · 为什么删：栈的公开不变量是"状态 == 前 index_ 条命令的重放结果"，
+    //     历史面板的行就是状态、点击行调 setIndex(j)。若保留这条命令只做
+    //     标记，状态就不再等于任何前缀，点击历史行必然对不上（用户实测
+    //     报过这个 bug）。删掉后不变量恒成立，游标也自然左移——历史面板的
+    //     高亮跟着动，反馈与状态一致。
+    //   · 代价（如实声明，设计精讲 §8.2）：这一步不能再用 Ctrl+Y 重做回来，
+    //     原有的 redo 分支也一并作废（改历史 = 原来的未来不再成立，与 push
+    //     同规则）。它是"把某通道的一步从历史里抹掉"，不是"临时跳过"。
     const bool wasClean = isClean();
     const SelectionMemento selNow = captureSelection();
 
-    cmds_[size_t(k)]->undo();
-    applied_[size_t(k)] = 0;
-    for (int i = k + 1; i < index_; ++i) {
-        if (applied_[size_t(i)])
-            cmds_[size_t(i)]->redo();
-    }
+    // 改写历史 ⇒ redo 分支作废（与 push 同规则：你改了历史，原来的"未来"就不
+    // 再成立）。必须显式截断，不能留着：redo 段里同通道命令的基线快照是按
+    // "包含 k"的状态捕获的，留着它们以后重做就会算错（T20 实测场景）。
+    truncateRedo();
 
-    applySelection(selNow);             // 选择集恢复原状（游标未动）
-    notifyIndexChanged(index_);         // 内容变了，历史面板要刷新
+    cmds_[size_t(k)]->undo();
+    for (int i = k + 1; i < index_; ++i)
+        cmds_[size_t(i)]->redo();
+
+    // 从历史移除 k（两张平行表 + 字节账 + clean 检查点同步）
+    totalBytes_ -= entries_[size_t(k)].bytes;
+    cmds_.erase(cmds_.begin() + k);
+    entries_.erase(entries_.begin() + k);
+    if (cleanIndex_ == k)
+        cleanIndex_ = -1;               // 检查点包含这一步，那个状态已不存在
+    else if (cleanIndex_ > k)
+        --cleanIndex_;
+    index_ = int(cmds_.size());         // 剩余命令全部已执行（redo 段已被截断）
+
+    applySelection(selNow);             // 选择集保持用户眼前的样子
+    notifyIndexChanged(index_);
     emitCleanIfChanged(wasClean);
     return true;
 }
@@ -258,7 +260,6 @@ void CommandStack::clear()
     const bool wasClean = isClean();
     cmds_.clear();
     entries_.clear();
-    applied_.clear();
     index_ = 0;
     totalBytes_ = 0;
     cleanIndex_ = -1;
@@ -318,7 +319,6 @@ bool CommandStack::trimBudgetQuiet()
     totalBytes_ -= freed;
     cmds_.erase(cmds_.begin(), cmds_.begin() + drop);
     entries_.erase(entries_.begin(), entries_.begin() + drop);
-    applied_.erase(applied_.begin(), applied_.begin() + drop);
     index_ = (std::max)(0, index_ - drop);   // 括号防 Windows 的 max 宏
     if (cleanIndex_ >= 0) {
         cleanIndex_ -= drop;
@@ -396,7 +396,6 @@ void CommandStack::appendExecuted(std::unique_ptr<Command> cmd, int64_t timestam
     cmds_.push_back(std::move(cmd));
     Entry e = makeEntry(cmds_.back().get(), timestampMs);
     entries_.push_back(e);
-    applied_.push_back(1);
     index_ = int(cmds_.size());
     totalBytes_ += e.bytes;
     trimBudgetQuiet();
@@ -430,8 +429,10 @@ void CommandStack::truncateRedo()
         totalBytes_ -= entries_.back().bytes;
         cmds_.pop_back();
         entries_.pop_back();
-        applied_.pop_back();
     }
+    // 检查点若落在被丢弃的 redo 段里，那个状态已不可达 → 永久丢失（同裁剪）
+    if (cleanIndex_ > index_)
+        cleanIndex_ = -1;
 }
 
 CommandStack::Entry CommandStack::makeEntry(const Command* c, int64_t timestampMs) const

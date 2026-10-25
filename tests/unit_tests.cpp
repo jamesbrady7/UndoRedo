@@ -550,11 +550,11 @@ static void t12_time_window()
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// T13 context 过滤撤销：向前搜索 + 重放不变式
+// T13 context 过滤撤销：向前搜索 + 重放不变式 + 历史移除
 // ════════════════════════════════════════════════════════════════════════
 static void t13_context_filter()
 {
-    printf("== T13 undoIn(ctx): Eclipse 式子序列撤销 + 重放不变式 ==\n");
+    printf("== T13 undoIn(ctx): 子序列撤销 + 重放不变式 + 从历史移除 ==\n");
     printf("   (用幂等 SetVar 命令 —— undoIn 重放依赖幂等纪律)\n");
     int posX = 0, color = 0;
     ur::CommandStack stack;
@@ -568,25 +568,28 @@ static void t13_context_filter()
 
     checkOk(stack.canUndoIn(ctxInspector), "canUndoIn(inspector) 可见");
     const int idxBefore = stack.index();
+    const int cntBefore = stack.count();
     checkOk(stack.undoIn(ctxInspector), "undoIn(inspector) 执行成功");
-    checkOk(color == 0, "属性改动被精准挖掉");
+    checkOk(color == 0, "属性改动被精准撤掉");
     checkOk(posX == 15, "重放不变式: 其余 context 的净效果不变(幂等重放)");
-    checkOk(stack.index() == idxBefore, "游标不动(历史形状未变)");
-    checkOk(!stack.canUndoIn(ctxInspector), "B 已中和: inspector 子序列清空");
+    checkOk(stack.count() == cntBefore - 1, "该步从历史里移除(条数 -1)");
+    checkOk(stack.index() == idxBefore - 1, "游标随之左移(高亮=状态)");
+    checkOk(!stack.canUndoIn(ctxInspector), "B 已移除: inspector 子序列清空");
     checkOk(stack.canUndoIn(ctxCanvas), "canvas 子序列仍在");
 
-    // 向前搜索: 跳过不匹配的栈顶与已中和的旧命令, 撤到新的 inspector 命令
+    // 向前搜索: 跳过不匹配的栈顶, 撤到新的 inspector 命令
     stack.push(sv(color, 8, 201, ctxInspector));  // D: 属性(from=0)
     stack.push(sv(posX, 16, 101, ctxCanvas));     // E: 画布(栈顶)
     checkOk(stack.undoIn(ctxInspector), "栈顶不匹配时向前搜索命中 D");
-    checkOk(color == 0 && posX == 16, "D 被挖除, 上方 E 重放, posX 不变");
+    checkOk(color == 0 && posX == 16, "D 被移除, 上方 E 重放, posX 不变");
+    checkOk(stack.count() == 3 && stack.index() == 3, "历史/游标同步(3 条)");
 
-    // 线性 undo 依然一路可用：被挖除的命令在游标经过时【跳过】（不再撤第二次），
-    // 其余命令照常回滚 —— 旧版单向中和标记会在这里把同一命令撤两遍（T16 专测）。
+    // 线性 undo 依然一路可用：被移除的命令已经不在历史里，不可能再被撤第二次
     int guard = 0;
     while (stack.canUndo() && guard++ < 20)
         stack.undo();
     checkOk(posX == 0 && color == 0, "常规线性 undo 到起点, 状态归零");
+    checkOk(stack.count() == 3, "undo 不删历史(与 undoIn 的差别)");
 
     // 无命中返回 false
     checkOk(!stack.undoIn(ctxInspector), "无命中: undoIn 返回 false");
@@ -674,11 +677,11 @@ static void t15_merge_budget()
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// T16 同一条命令绝不被 undo 两次（applied_ 位图）
+// T16 同一条命令绝不被 undo 两次（undoIn 移除语义）
 // ════════════════════════════════════════════════════════════════════════
 static void t16_no_double_undo()
 {
-    printf("== T16 undoIn 挖除后线性 undo: 不重复撤销(旧版真 bug) ==\n");
+    printf("== T16 undoIn 移除该步后: 线性 undo 不重复撤销(旧版真 bug) ==\n");
     int v = 0;
     int undoA = 0, undoB = 0;
     ur::CommandStack stack;
@@ -689,21 +692,18 @@ static void t16_no_double_undo()
     stack.push(std::make_unique<UndoCounter>(v, 5, &undoA, 100, ctxInspector));  // A(栈顶)
     checkOk(v == 8, "两条相对增量命令就位");
 
-    checkOk(stack.undoIn(ctxInspector), "undoIn 挖掉栈顶的属性命令 A");
-    checkOk(v == 3 && undoA == 1, "A 被撤且只撤一次(上方无命令可重放)");
+    checkOk(stack.undoIn(ctxInspector), "undoIn 撤掉栈顶的属性命令 A 并移除");
+    checkOk(v == 3 && undoA == 1, "A 被撤且只撤一次");
+    checkOk(stack.count() == 1 && stack.index() == 1, "历史里只剩 B");
 
-    stack.undo();                       // 游标 2 -> 1：游标落在 A 上，但 A 已是 0 → 跳过
+    stack.undo();                       // 游标 1 -> 0：只可能撤 B
     checkOk(undoA == 1, "A 没有被第二次 undo(旧版会变成 2)");
-    checkOk(v == 3, "数值未被二次扣减(旧版会变成 -2)");
-    checkOk(stack.index() == 1, "游标照常前移(跳过不等于卡住)");
+    checkOk(v == 0 && undoB == 1, "数值未被二次扣减(旧版会变成 -2)");
 
-    stack.undo();                       // 游标 1 -> 0：撤 B
-    checkOk(v == 0 && undoB == 1, "继续线性 undo 才轮到 B");
-
-    stack.redo();                       // 游标 0 -> 1：B 重放
-    checkOk(v == 3, "redo 先重放 B");
-    stack.redo();                       // 游标 1 -> 2：A 复活
-    checkOk(v == 8 && undoA == 1, "线性 redo 复活被挖除的 A(Ctrl+Z 后 Ctrl+Y 回到原状)");
+    stack.redo();                       // B 重放
+    checkOk(v == 3 && stack.index() == 1, "redo 重放 B");
+    checkOk(!stack.canRedo(), "A 不会复活: undoIn 是【从历史移除】不是临时跳过");
+    checkOk(stack.count() == 1, "条数不变(1 条)");
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -790,9 +790,62 @@ static void t19_factory_context()
 }
 
 // ════════════════════════════════════════════════════════════════════════
+// T20 历史行 = 状态：反复 undoIn 之后点击任意历史行都必须精确复现
+//     （用户实测 bug 的回归：旧版"挖除+游标不动"会让行与状态对不上）
+// ════════════════════════════════════════════════════════════════════════
+static void t20_history_rows_are_states()
+{
+    printf("== T20 历史行=状态: 多次 undoIn 后逐行 setIndex 精确复现 ==\n");
+    int x = 0, color = 0;
+    ur::CommandStack stack;
+    ur::ContextSet ctxCanvas;    ctxCanvas.insert(ur::kCtxCanvas);
+    ur::ContextSet ctxInspector; ctxInspector.insert(ur::kCtxInspector);
+
+    // 绝对终态命令（幂等），这样"期望状态"可以独立算出来做对照
+    stack.push(sv(x, 10, 101, ctxCanvas));        // 1: x=10
+    stack.push(sv(color, 1, 201, ctxInspector));  // 2: color=1
+    stack.push(sv(x, 15, 101, ctxCanvas));        // 3: x=15
+    stack.push(sv(color, 8, 201, ctxInspector));  // 4: color=8
+    stack.push(sv(x, 16, 101, ctxCanvas));        // 5: x=16
+    checkOk(x == 16 && color == 8, "五条命令就位");
+
+    // 连续两次"只撤销属性改动"（就是用户反复点那两个按钮）
+    checkOk(stack.undoIn(ctxInspector), "第一次 undoIn: 移除 color=8");
+    checkOk(stack.count() == 4 && stack.index() == 4, "历史 4 条, 游标 4");
+    checkOk(x == 16 && color == 1, "状态 = 剩余历史的重放(其它通道净效果不变)");
+
+    checkOk(stack.undoIn(ctxInspector), "第二次 undoIn: 移除 color=1");
+    checkOk(stack.count() == 3 && stack.index() == 3, "历史 3 条, 游标 3");
+    checkOk(x == 16 && color == 0, "两条属性改动都不在了");
+
+    // 不变量：当前状态 == 前 index 条命令按序重放
+    // 剩余历史 = [x=10, x=15, x=16] → 期望行状态如下
+    struct Row { int x; int color; };
+    const Row want[] = { {0, 0}, {10, 0}, {15, 0}, {16, 0} };
+    for (int j = 0; j <= stack.count(); ++j) {
+        stack.setIndex(j);
+        checkOk(x == want[j].x && color == want[j].color, "setIndex(j) 精确复现第 j 行状态");
+        checkOk(stack.index() == j, "游标 == 行号");
+    }
+
+    // 有 redo 段时：undoIn 是"改历史"，原来的未来（redo 段）一并作废
+    // ——与 push 同规则。不截断的话，redo 段里同通道命令的基线快照是按
+    // "包含被移除那条"的状态捕获的，以后重做必然算错。
+    stack.setIndex(1);                            // 回滚到 x=10，redo 段 = [x=15, x=16]
+    checkOk(x == 10 && color == 0 && stack.index() == 1, "跳回第 1 行");
+    checkOk(stack.canRedo(), "redo 段存在");
+    checkOk(stack.undoIn(ctxCanvas), "redo 段存在时 undoIn 移除 x=10");
+    checkOk(x == 0, "状态回到移除后的前缀(空历史 = 初始状态)");
+    checkOk(stack.count() == 0 && stack.index() == 0, "历史被改写成 0 条");
+    checkOk(!stack.canRedo(), "redo 分支已作废(与 push 同规则)");
+    stack.setIndex(0);
+    checkOk(x == 0, "再次跳转仍然一致");
+}
+
+// ════════════════════════════════════════════════════════════════════════
 int main()
 {
-    printf("UndoRedoDemo unit_tests —— undoredo_core 框架 19 块自检(零 Qt 依赖)\n");
+    printf("UndoRedoDemo unit_tests —— undoredo_core 框架 20 块自检(零 Qt 依赖)\n");
     printf("(每块自包含; 退出码 = 失败断言数)\n\n");
 
     t1_basic();
@@ -814,6 +867,7 @@ int main()
     t17_session_boundary();
     t18_setclean_notify();
     t19_factory_context();
+    t20_history_rows_are_states();
 
     printf("\n== 汇总: %d OK, %d FAIL ==\n", g_ok, g_fail);
     printf("== unit_tests %s ==\n", g_fail == 0 ? "PASS" : "FAIL");
