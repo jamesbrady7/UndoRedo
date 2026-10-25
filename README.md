@@ -54,9 +54,17 @@ tests/         unit_tests.cpp: T1~T14(零 Qt——core 纯净性的活证据)
 docs/          设计精讲.md: 十四章(调研对照/机制走读/踩坑记录)
 ```
 
-## 验证基线（2026-10-18，core 去 Qt 化后本机实测）
+## 验证基线（2026-10-25，评审修复后复测）
 
 - Debug + Release 双配置三目标构建：**0 error / 0 warning**
-- `unit_tests`：88 OK / 0 FAIL，退出码 0（双配置；已不链任何 Qt）
-- `undoredo_demo --selftest`：35 OK / 0 FAIL，退出码 0（双配置）
-- GUI 冒烟：窗口正常启动运行；`grep "#include <Q" src/core tests` 零命中
+- `unit_tests`：**111 OK / 0 FAIL**，退出码 0（双配置；已不链任何 Qt）
+- `undoredo_demo --selftest`：**38 OK / 0 FAIL**，退出码 0（双配置）
+- `-DUR_BUILD_DEMO=OFF`：只构建 core + 单测并跑通（Qt 环境缺失时也能用）
+- GUI 冒烟：窗口正常启动运行；**有选中项时关窗也干净退出**（见设计精讲 §13.9）
+- `grep "#include <Q" src/core tests` 零命中
+
+## 从哪读起
+
+先看 **[docs/代码导读.md](docs/代码导读.md)**：5 分钟速览 → 推荐阅读顺序
+→ 每站要盯住的关键函数 → 数据流图 → 常见困惑 Q&A → 怎么加命令/加测试。
+机制背后的取舍再看设计精讲。
