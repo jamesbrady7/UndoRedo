@@ -8,13 +8,22 @@
 //  2. 双预算截断：条数上限 + 字节预算，超限从栈底弹（Krita/Blender 经验）
 //  3. 最小通知面：onIndexChanged 为主回调；setIndex 跨 N 步只发一次
 //     （Qt 的 canUndoChanged/undoTextChanged/indexChanged 多信号风暴）
-//  4. undoIn(ctx)：Eclipse IUndoContext 式子序列撤销（向前搜索 + 重放）
+//  4. undoIn(ctx)：Eclipse IUndoContext 式子序列撤销（向前搜索 + 上层重放）
 //  5. 合并策略可插拔（setMergePolicy），且时间戳来自可注入时钟（可测性）
 //  6. 宏是 RAII 的（TransactionScope 包装 beginMacro/endMacro），
 //     支持 abort 逆序回滚与空事务自动丢弃
 //
 // 所有权：栈接管 push 进来的命令（unique_ptr），clear()/析构时释放。
 // 线程模型：单线程（GUI 线程），与 QUndoStack 相同；不做锁。
+//
+// ★ applied_ 位图（与 cmds_ 严格平行）：每条命令"此刻是否真的生效"。
+//   正常线性历史里它恒等于 [0,index_) 全 1、其余全 0；undoIn() 会把某条
+//   单独置 0（游标不动），于是"已执行区"里出现一个空洞。undo/redo 步进
+//   因此必须查这个位图：
+//     · 已经是 0 的命令，线性 undo 不再调 undo()（否则就是【撤销两次】，
+//       相对增量式命令会当场算错——这是旧版用单向 neutralized_ 标记时的真 bug）
+//     · 线性 redo 会把它重新置 1（Ctrl+Z 后再 Ctrl+Y 应回到原状态）
+//   推论：canUndo() 只表示"游标左侧还有历史"，不代表"按下去一定有效果"。
 //
 // 纯 C++17 零依赖：不继承 QObject，通知走内嵌 Observer 接口（Qt 侧
 // 由 demo 层的 StackBridge 把回调重发为信号）。Observer 三条纪律：
@@ -78,8 +87,12 @@ public:
     bool redo();
 
     // ── Eclipse 式 context 过滤撤销（子序列 undo，游标不动）────────
-    // 从 index_-1 向前搜索首条 contexts 与 ctx 相交的命令，undo 它，
-    // 再把它上方、游标下方的命令升序重放——其余 context 的净效果不变。
+    // 从 index_-1 向前搜索首条"仍生效且 contexts 与 ctx 相交"的命令，
+    // 只撤它一条（applied=false），再把它上方、游标下方仍生效的命令升序
+    // 重放一遍——因为那条命令的 undo 可能覆盖掉上层命令对同一目标的写入
+    // （例如 B 把 X 移到 10、C 再把 X 移到 20；撤掉 B 会把 X 拽回 0，
+    // 必须重放 C 才能让"画布通道的净效果不变"）。重放安全的前提就是
+    // Command.h 的 redo 幂等纪律。
     // ctx 为空等价于普通 undo()。代价与边界如实声明于设计精讲 §8。
     bool canUndoIn(const ContextSet& ctx) const;
     bool undoIn(const ContextSet& ctx);
@@ -88,7 +101,10 @@ public:
     void setIndex(int i);               // [0, count()]；批量执行只发一次通知
     int  index() const { return index_; }
     int  count() const { return int(cmds_.size()); }
-    std::vector<Entry> history() const { return entries_; }
+    // 返回【引用】：历史面板每次通知都要读它，按值返回等于每次通知都复制
+    // 一整张表（含 N 个 std::string）。约定：引用只在栈下一次被修改前有效，
+    // 别把它存成成员或跨 push/undo 使用。
+    const std::vector<Entry>& history() const { return entries_; }
     void clear();                       // 丢弃全部历史（不回滚效果，同 Qt）
 
     // ── 预算与检查点 ────────────────────────────────────────────
@@ -132,15 +148,17 @@ private:
     void stepRedoInternal(bool applySel);
     void emitCleanIfChanged(bool wasClean);
     Entry makeEntry(const Command* c, int64_t timestampMs) const;
-    static bool matchesContext(const Command* c, const ContextSet& ctx);
+    // 相交判定用的是 Entry 里【冻结】的 context（push 时快照），而不是
+    // 现问 command：① 免掉每次搜索都构造一个 unordered_set；② 保证"历史
+    // 面板显示的标签"与"能被 undoIn 命中的标签"永远是同一份数据。
+    static bool contextIntersects(const ContextSet& frozen, const ContextSet& ctx);
 
     std::vector<std::unique_ptr<Command>> cmds_;    // 活动命令（所有权）
     std::vector<Entry> entries_;                    // 与 cmds_ 严格平行
-    // 与 cmds_ 严格平行：被 undoIn(ctx) 外科手术式撤销过的命令标记。
-    // 已中和的命令不再被 canUndoIn/undoIn 搜索命中，也不参与 undoIn 重放；
-    // 线性 undo/redo/setIndex 仍会正常执行它（历史保持线性完整）。
-    // 这是"子序列撤销"与"线性历史"共存的边界，设计精讲 §8 如实声明。
-    std::vector<char> neutralized_;
+    // 与 cmds_ 严格平行：每条命令此刻是否真的生效（1=生效，0=被 undoIn 挖掉）。
+    // 语义与不变量见文件头 ★ 段。绝不能退化成"单向中和标记"——那样线性 undo
+    // 会把同一条命令撤两次。
+    std::vector<char> applied_;
     int    index_ = 0;                              // 游标：已执行命令数
     int64_t totalBytes_ = 0;
     int    cleanIndex_ = -1;                        // -1 = 无检查点/已丢失

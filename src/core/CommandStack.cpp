@@ -91,7 +91,11 @@ void CommandStack::push(std::unique_ptr<Command> cmd)
             entries_.back().merged = true;
             top->selAfter = cmd->selAfter;  // 选择快照更新到最新效果之后
             totalBytes_ += newBytes - oldBytes;
+            // 合并同样可能把字节账推过预算（吸收的载荷可能比原来大），
+            // 所以这条路径也必须过一遍裁剪——否则"字节预算是硬承诺"就漏了一个入口。
+            trimBudgetQuiet();
             notifyIndexChanged(index_);
+            emitCleanIfChanged(wasClean);
             return;                     // cmd 随 unique_ptr 析构被丢弃
         }
     }
@@ -101,7 +105,7 @@ void CommandStack::push(std::unique_ptr<Command> cmd)
     cmds_.push_back(std::move(cmd));
     Entry e = makeEntry(cmds_.back().get(), now);   // ⑦ 元数据在此冻结
     entries_.push_back(e);
-    neutralized_.push_back(0);
+    applied_.push_back(1);              // 新命令一定处于生效态
     index_ = int(cmds_.size());
     totalBytes_ += e.bytes;
     trimBudgetQuiet();                  // ⑧ 双预算从栈底裁剪
@@ -136,7 +140,12 @@ void CommandStack::stepUndoInternal(bool applySel)
 {
     --index_;
     Command* c = cmds_[size_t(index_)].get();
-    c->undo();
+    // 只有"仍生效"的命令才调 undo()。被 undoIn 挖掉的那条已经是 0，
+    // 再撤一次就是重复撤销（相对增量式命令会当场算错，见文件头 ★ 段）。
+    if (applied_[size_t(index_)]) {
+        c->undo();
+        applied_[size_t(index_)] = 0;
+    }
     if (applySel)
         applySelection(c->selBefore);
 }
@@ -144,19 +153,25 @@ void CommandStack::stepUndoInternal(bool applySel)
 void CommandStack::stepRedoInternal(bool applySel)
 {
     Command* c = cmds_[size_t(index_)].get();
-    c->redo();
+    // 反向同理：已经是生效态的不重放（否则相对增量命令会被放大）。
+    // 线性 redo 会复活被 undoIn 挖掉的命令——Ctrl+Z 之后 Ctrl+Y 应当
+    // 回到按 Ctrl+Z 之前的样子，这是用户对"线性历史"的基本预期。
+    if (!applied_[size_t(index_)]) {
+        c->redo();
+        applied_[size_t(index_)] = 1;
+    }
     ++index_;
     if (applySel)
         applySelection(c->selAfter);
 }
 
-// ── context 过滤撤销（Eclipse 式向前搜索 + 上方重放）───────────────────
+// ── context 过滤撤销（Eclipse 式向前搜索 + 上层重放）───────────────────
 bool CommandStack::canUndoIn(const ContextSet& ctx) const
 {
     if (ctx.empty())
         return canUndo();
     for (int i = index_ - 1; i >= 0; --i) {
-        if (!neutralized_[size_t(i)] && matchesContext(cmds_[size_t(i)].get(), ctx))
+        if (applied_[size_t(i)] && contextIntersects(entries_[size_t(i)].contexts, ctx))
             return true;
     }
     return false;
@@ -167,8 +182,8 @@ bool CommandStack::undoIn(const ContextSet& ctx)
     if (ctx.empty())
         return undo();
     int k = -1;
-    for (int i = index_ - 1; i >= 0; --i) {     // 向前搜索首条命中（跳过已中和）
-        if (!neutralized_[size_t(i)] && matchesContext(cmds_[size_t(i)].get(), ctx)) {
+    for (int i = index_ - 1; i >= 0; --i) {     // 向前搜索首条命中（跳过已挖掉的）
+        if (applied_[size_t(i)] && contextIntersects(entries_[size_t(i)].contexts, ctx)) {
             k = i;
             break;
         }
@@ -177,20 +192,23 @@ bool CommandStack::undoIn(const ContextSet& ctx)
         return false;
 
     // 演示语义（设计精讲 §8 如实声明代价）：
-    //   undo 目标命令 → 把它上方、游标下方的【未中和】命令升序重放。
+    //   undo 目标命令 → 把它上方、游标下方的【仍生效】命令升序重放。
     //   游标不动、历史形状不变，净效果 = 精准挖掉 k 的效果。
-    //   两条前提写进命令契约：
-    //   · 命令必须幂等（redo 重放安全）——相对增量式命令不满足，会被重放放大
-    //   · k 之后若有依赖 k 的命令（如"删除了 k 修改的对象"），其重放按
-    //     各自的目标安全规则 no-op（findShape 找不到即跳过）
-    //   k 被标记"已中和"：不再被子序列搜索命中，也不参与后续重放。
+    //   为什么要重放：k 的 undo 可能覆盖掉上层命令对同一目标的写入
+    //   （B 把 X 移到 10、C 把 X 移到 20；撤 B 会把 X 拽回初态，必须
+    //   重放 C 才能让"画布通道净效果不变"）。重放安全的唯一前提是
+    //   Command.h 的 redo 幂等纪律。
+    //   为什么只撤 k 一条（而不是先撤到 k 再重放）：那样会无谓地动到
+    //   其它命令，且在"目标已被删"的场景多制造 no-op 噪声。
+    //   k 被置 applied=false：不再被子序列搜索命中；线性 undo 走到它时
+    //   会跳过（不会撤第二次），线性 redo 会把它复活。
     const bool wasClean = isClean();
     const SelectionMemento selNow = captureSelection();
 
     cmds_[size_t(k)]->undo();
-    neutralized_[size_t(k)] = 1;
+    applied_[size_t(k)] = 0;
     for (int i = k + 1; i < index_; ++i) {
-        if (!neutralized_[size_t(i)])
+        if (applied_[size_t(i)])
             cmds_[size_t(i)]->redo();
     }
 
@@ -200,15 +218,18 @@ bool CommandStack::undoIn(const ContextSet& ctx)
     return true;
 }
 
-bool CommandStack::matchesContext(const Command* c, const ContextSet& ctx)
+bool CommandStack::contextIntersects(const ContextSet& frozen, const ContextSet& ctx)
 {
-    if (!c)
+    // 小集合对撞：先遍历元素少的那个（contexts 通常 1~2 个标签）。
+    if (frozen.size() > ctx.size()) {
+        for (const std::string& s : ctx)
+            if (frozen.find(s) != frozen.end())
+                return true;
         return false;
-    const ContextSet cs = c->contexts();    // Compound 穿透：聚合子命令标签
-    for (const std::string& s : cs) {
-        if (containsCtx(ctx, s))
-            return true;
     }
+    for (const std::string& s : frozen)
+        if (ctx.find(s) != ctx.end())
+            return true;
     return false;
 }
 
@@ -237,7 +258,7 @@ void CommandStack::clear()
     const bool wasClean = isClean();
     cmds_.clear();
     entries_.clear();
-    neutralized_.clear();
+    applied_.clear();
     index_ = 0;
     totalBytes_ = 0;
     cleanIndex_ = -1;
@@ -273,33 +294,48 @@ void CommandStack::setMemoryBudget(int64_t bytes)
 // 游标与 clean 检查点随之下移；检查点弹出栈底即"永久丢失"（-1），
 // 与 Qt 的"clean 状态不可恢复"语义一致。极端情况：单条命令就超预算 →
 // 一直弹到空栈（诚实语义：预算是硬承诺，不做"至少留一条"的含糊）。
+//
+// 实现：先算出要弹几条，再一次性 erase 区间。旧版在循环里 erase(begin())
+// 每次搬动整个 vector，最坏 O(n^2)——预算收紧到 0 时正好是最坏情况。
 bool CommandStack::trimBudgetQuiet()
 {
-    bool changed = false;
-    while (!cmds_.empty()) {
-        const bool overSteps = undoLimit_ > 0 && int(cmds_.size()) > undoLimit_;
-        const bool overBytes = memoryBudget_ > 0 && totalBytes_ > memoryBudget_;
+    if (cmds_.empty())
+        return false;
+
+    int drop = 0;
+    int64_t freed = 0;
+    while (drop < int(cmds_.size())) {
+        const bool overSteps = undoLimit_ > 0 && (int(cmds_.size()) - drop) > undoLimit_;
+        const bool overBytes = memoryBudget_ > 0 && (totalBytes_ - freed) > memoryBudget_;
         if (!overSteps && !overBytes)
             break;
-        totalBytes_ -= entries_.front().bytes;
-        cmds_.erase(cmds_.begin());
-        entries_.erase(entries_.begin());
-        neutralized_.erase(neutralized_.begin());
-        index_ = (std::max)(0, index_ - 1);   // 括号防 Windows 的 max 宏
-        if (cleanIndex_ >= 0) {
-            --cleanIndex_;
-            if (cleanIndex_ < 0)
-                cleanIndex_ = -1;       // 检查点被裁掉 → 丢失
-        }
-        changed = true;
+        freed += entries_[size_t(drop)].bytes;
+        ++drop;
     }
-    return changed;
+    if (drop == 0)
+        return false;
+
+    totalBytes_ -= freed;
+    cmds_.erase(cmds_.begin(), cmds_.begin() + drop);
+    entries_.erase(entries_.begin(), entries_.begin() + drop);
+    applied_.erase(applied_.begin(), applied_.begin() + drop);
+    index_ = (std::max)(0, index_ - drop);   // 括号防 Windows 的 max 宏
+    if (cleanIndex_ >= 0) {
+        cleanIndex_ -= drop;
+        if (cleanIndex_ < 0)
+            cleanIndex_ = -1;       // 检查点被裁掉 → 丢失
+    }
+    return true;
 }
 
 void CommandStack::setClean()
 {
+    const bool wasClean = isClean();
     cleanIndex_ = index_;
-    notifyCleanChanged(true);           // 无条件发（与 Qt setClean 语义一致，非变位才发）
+    // 变位才发（与 Qt QUndoStack::setClean 一致）：连点两次"保存"不该
+    // 让观察者再刷一遍 UI。旧版无条件 notify，与"最小通知面"自相矛盾。
+    if (!wasClean)
+        notifyCleanChanged(true);
 }
 
 // ── 策略注入 ───────────────────────────────────────────────────────────
@@ -360,7 +396,7 @@ void CommandStack::appendExecuted(std::unique_ptr<Command> cmd, int64_t timestam
     cmds_.push_back(std::move(cmd));
     Entry e = makeEntry(cmds_.back().get(), timestampMs);
     entries_.push_back(e);
-    neutralized_.push_back(0);
+    applied_.push_back(1);
     index_ = int(cmds_.size());
     totalBytes_ += e.bytes;
     trimBudgetQuiet();
@@ -394,7 +430,7 @@ void CommandStack::truncateRedo()
         totalBytes_ -= entries_.back().bytes;
         cmds_.pop_back();
         entries_.pop_back();
-        neutralized_.pop_back();
+        applied_.pop_back();
     }
 }
 

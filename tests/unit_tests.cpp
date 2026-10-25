@@ -2,7 +2,7 @@
 // unit_tests —— undoredo_core 框架层单元测试（纯 C++17，零 Qt 依赖）
 //
 // 约定（照 NavTreeGroup）：
-//   · 14 块自包含测试，每块打印 职责/输入/输出/校验，[OK]/[FAIL] 标记
+//   · 19 块自包含测试，每块打印 职责/输入/输出/校验，[OK]/[FAIL] 标记
 //   · 退出码 = 失败断言数（0 = 全绿）；不依赖 CTest
 //   · printf 格式串里只用 ASCII 符号（装饰性 Unicode 会触发 C4474
 //     并破坏 MSVC 的参数检查）；中文正文本身 GBK 可表示，安全
@@ -86,6 +86,7 @@ public:
         if (!n)
             return false;
         delta_ += n->delta_;        // 只吸收效果，不改自身"起点"
+        bytes_ += n->bytes_;        // 载荷只增不减（真实命令的 from_/to_ 也是这个走向）
         return true;
     }
     int delta() const { return delta_; }
@@ -153,6 +154,48 @@ std::unique_ptr<SetVarCommand> sv(int& var, int to, int id = 300,
 {
     return std::make_unique<SetVarCommand>(var, to, id, std::move(ctx));
 }
+
+// 重建上下文：creator 从它身上拿到"这次回放写哪个变量"。
+// 这正是不该用 lambda 捕获的原因——捕获的是测试函数栈上的引用，函数一返回
+// 就悬垂；显式上下文只在 fromPayload 调用期间有效，注册表不保存它。
+class IntCtx : public ur::CommandContext
+{
+public:
+    explicit IntCtx(int* v) : var(v) {}
+    int* var;
+};
+
+// 统计 undo 调用次数的增量命令：专门用来暴露"同一条命令被撤两次"的 bug。
+// 相对增量命令不幂等 —— 多撤一次，数值就错一次（T16 的判定依据）。
+class UndoCounter : public TestCommand
+{
+public:
+    UndoCounter(int& target, int delta, int* counter, int id,
+                ur::ContextSet ctx = ur::ContextSet())
+        : TestCommand(target, delta, id, std::string(), std::move(ctx))
+        , counter_(counter)
+    {
+    }
+    void undo() override
+    {
+        ++*counter_;
+        TestCommand::undo();
+    }
+
+private:
+    int* counter_;
+};
+
+// 声明"显式会话边界"的命令（手势号 >0 的等价物）：时间窗不该阻断合并。
+class SessionCommand : public TestCommand
+{
+public:
+    SessionCommand(int& target, int delta, std::string tag, int id = 400)
+        : TestCommand(target, delta, id, std::move(tag))
+    {
+    }
+    bool mergeTagHasSession() const override { return true; }
+};
 
 } // namespace
 
@@ -290,7 +333,8 @@ static void t5_clean()
     s2.setUndoLimit(1);                 // 弹栈底 → cleanIndex 0 -> -1(丢失)
     s2.undo();
     checkOk(!s2.isClean(), "零位检查点随栈底弹出永久丢失(不假装 clean)");
-    checkOk(obs.cleanSignals >= 3, "cleanChanged 只在变位时发");
+    checkOk(obs.cleanSignals == 5,
+            "cleanChanged 只在变位时发(5 次真实变位, 含 setClean 的假重复不算)");
     stack.removeObserver(&obs);         // 纪律示范: Observer 析构前显式 remove
 }
 
@@ -537,7 +581,8 @@ static void t13_context_filter()
     checkOk(stack.undoIn(ctxInspector), "栈顶不匹配时向前搜索命中 D");
     checkOk(color == 0 && posX == 16, "D 被挖除, 上方 E 重放, posX 不变");
 
-    // 线性 undo 依然一路可用(已中和命令按原语义重放, 幂等命令收敛到初态)
+    // 线性 undo 依然一路可用：被挖除的命令在游标经过时【跳过】（不再撤第二次），
+    // 其余命令照常回滚 —— 旧版单向中和标记会在这里把同一命令撤两遍（T16 专测）。
     int guard = 0;
     while (stack.canUndo() && guard++ < 20)
         stack.undo();
@@ -569,13 +614,19 @@ static void t14_payload()
     const ur::Payload wire{doc.type, doc.data};
     checkOk(wire.data == doc.data, "payload 文本往返字节级相等");
 
-    int& captured = var2;
-    ur::CommandFactory::instance().registerType("test.setvar",
-        [&captured](const std::string& data) {
-            return std::make_unique<SetVarCommand>(captured,
-                                                   SetVarCommand::parseTo(data));
+    // ★ 自建工厂实例(不用 instance()): 全局注册表跨用例累积状态, 会让
+    //   "未注册类型"这类断言悄悄失真; 也避免把测试 lambda 永久留在全局表里。
+    ur::CommandFactory factory;
+    factory.registerType("test.setvar",
+        [](const std::string& data, ur::CommandContext& ctx)
+            -> std::unique_ptr<ur::Command> {
+            auto* c = dynamic_cast<IntCtx*>(&ctx);
+            if (!c)
+                return nullptr;         // 上下文不匹配 = 优雅降级
+            return std::make_unique<SetVarCommand>(*c->var, SetVarCommand::parseTo(data));
         });
-    auto rebuilt = ur::CommandFactory::instance().fromPayload(wire);
+    IntCtx ctx(&var2);
+    auto rebuilt = factory.fromPayload(wire, ctx);
     checkOk(rebuilt != nullptr, "工厂按类型名重建命令");
 
     ur::CommandStack stack2;
@@ -585,12 +636,14 @@ static void t14_payload()
     checkOk(var2 == 100, "重建命令的 undo 同样正确(初态在首次 redo 时捕获)");
 
     // 未注册类型 → nullptr(不崩, 优雅降级)
-    checkOk(ur::CommandFactory::instance().fromPayload(
-                ur::Payload{"no.such", "{}"}) == nullptr,
+    checkOk(factory.fromPayload(ur::Payload{"no.such", "{}"}, ctx) == nullptr,
             "未注册类型返回 nullptr");
     // 空 type(不可序列化命令的 toPayloadDoc 结果) → nullptr
-    checkOk(ur::CommandFactory::instance().fromPayload(ur::Payload{}) == nullptr,
+    checkOk(factory.fromPayload(ur::Payload{}, ctx) == nullptr,
             "空 type 返回 nullptr");
+    // 注册表可回收: 没有 unregisterType 时, 测试/插件只能污染到进程结束
+    checkOk(factory.unregisterType("test.setvar") && !factory.contains("test.setvar"),
+            "unregisterType 生效(注册表可回收)");
     // 不可序列化命令(payloadType 空) → type 为空的 Payload
     int v = 0;
     TestCommand plain(v, 1);
@@ -599,9 +652,147 @@ static void t14_payload()
 }
 
 // ════════════════════════════════════════════════════════════════════════
+// T15 合并路径也受字节预算约束
+// ════════════════════════════════════════════════════════════════════════
+static void t15_merge_budget()
+{
+    printf("== T15 合并路径的字节预算: 吸收大载荷后仍要裁剪 ==\n");
+    int v = 0;
+    ur::CommandStack stack;
+    stack.setClock(fakeClock);
+    stack.setMergePolicy(std::make_unique<ur::TimeWindowMergePolicy>(500));
+    stack.setMemoryBudget(150);
+
+    g_fakeNow = 1000;
+    stack.push(tc(v, 1, 100, "m", ur::ContextSet(), 100));   // 100B, 未超
+    checkOk(stack.count() == 1 && stack.totalBytes() == 100, "首条 100B 在预算内");
+    g_fakeNow = 1100;
+    stack.push(tc(v, 1, 100, "m", ur::ContextSet(), 200));   // 合并 → 300B, 超预算
+    checkOk(stack.count() == 0, "合并后超预算: 立即裁剪(旧版漏了这个入口)");
+    checkOk(stack.totalBytes() == 0, "字节账随裁剪清零");
+    checkOk(v == 2, "效果不回滚(裁的是历史, 不是状态)");
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// T16 同一条命令绝不被 undo 两次（applied_ 位图）
+// ════════════════════════════════════════════════════════════════════════
+static void t16_no_double_undo()
+{
+    printf("== T16 undoIn 挖除后线性 undo: 不重复撤销(旧版真 bug) ==\n");
+    int v = 0;
+    int undoA = 0, undoB = 0;
+    ur::CommandStack stack;
+    ur::ContextSet ctxCanvas;    ctxCanvas.insert(ur::kCtxCanvas);
+    ur::ContextSet ctxInspector; ctxInspector.insert(ur::kCtxInspector);
+
+    stack.push(std::make_unique<UndoCounter>(v, 3, &undoB, 101, ctxCanvas));     // B(下)
+    stack.push(std::make_unique<UndoCounter>(v, 5, &undoA, 100, ctxInspector));  // A(栈顶)
+    checkOk(v == 8, "两条相对增量命令就位");
+
+    checkOk(stack.undoIn(ctxInspector), "undoIn 挖掉栈顶的属性命令 A");
+    checkOk(v == 3 && undoA == 1, "A 被撤且只撤一次(上方无命令可重放)");
+
+    stack.undo();                       // 游标 2 -> 1：游标落在 A 上，但 A 已是 0 → 跳过
+    checkOk(undoA == 1, "A 没有被第二次 undo(旧版会变成 2)");
+    checkOk(v == 3, "数值未被二次扣减(旧版会变成 -2)");
+    checkOk(stack.index() == 1, "游标照常前移(跳过不等于卡住)");
+
+    stack.undo();                       // 游标 1 -> 0：撤 B
+    checkOk(v == 0 && undoB == 1, "继续线性 undo 才轮到 B");
+
+    stack.redo();                       // 游标 0 -> 1：B 重放
+    checkOk(v == 3, "redo 先重放 B");
+    stack.redo();                       // 游标 1 -> 2：A 复活
+    checkOk(v == 8 && undoA == 1, "线性 redo 复活被挖除的 A(Ctrl+Z 后 Ctrl+Y 回到原状)");
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// T17 显式会话边界让时间窗让位
+// ════════════════════════════════════════════════════════════════════════
+static void t17_session_boundary()
+{
+    printf("== T17 mergeTagHasSession: 手势会话内跨窗仍合并 ==\n");
+    int v = 0;
+    ur::CommandStack stack;
+    stack.setClock(fakeClock);
+    stack.setMergePolicy(std::make_unique<ur::TimeWindowMergePolicy>(500));
+
+    g_fakeNow = 1000;
+    stack.push(std::make_unique<SessionCommand>(v, 1, "move:x:7"));
+    g_fakeNow = 60000;                  // 60 秒后, 远超 500ms 窗口
+    stack.push(std::make_unique<SessionCommand>(v, 1, "move:x:7"));
+    checkOk(stack.count() == 1, "声明会话边界的命令: 跨窗仍合并(同一次手势)");
+
+    // 反例: 同一个 tag 但没声明会话 → 时间窗照常生效
+    int w = 0;
+    ur::CommandStack s2;
+    s2.setClock(fakeClock);
+    s2.setMergePolicy(std::make_unique<ur::TimeWindowMergePolicy>(500));
+    g_fakeNow = 1000;
+    s2.push(tc(w, 1, 100, "move:x:7"));
+    g_fakeNow = 60000;
+    s2.push(tc(w, 1, 100, "move:x:7"));
+    checkOk(s2.count() == 2, "无会话声明: 超窗即分段(时间窗默认行为不变)");
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// T18 setClean 只在变位时通知
+// ════════════════════════════════════════════════════════════════════════
+static void t18_setclean_notify()
+{
+    printf("== T18 setClean 变位才通知: 连点保存不刷 UI ==\n");
+    int v = 0;
+    ur::CommandStack stack;
+    CountingObserver obs;
+    stack.addObserver(&obs);
+
+    stack.setClean();                   // dirty -> clean: 1
+    stack.setClean();                   // 已是 clean: 不该再发
+    checkOk(obs.cleanSignals == 1, "重复 setClean 不重复通知(与 QUndoStack 一致)");
+    stack.push(tc(v, 1));               // clean -> dirty: 2
+    stack.setClean();                   // dirty -> clean: 3
+    stack.setClean();
+    checkOk(obs.cleanSignals == 3, "全部变位共 3 次, 空点保存 0 次");
+    stack.removeObserver(&obs);
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// T19 工厂上下文不匹配 + 实例隔离
+// ════════════════════════════════════════════════════════════════════════
+static void t19_factory_context()
+{
+    printf("== T19 工厂上下文: 类型不匹配降级 + 实例互不污染 ==\n");
+    ur::CommandFactory factory;
+    factory.registerType("test.setvar",
+        [](const std::string& data, ur::CommandContext& ctx)
+            -> std::unique_ptr<ur::Command> {
+            auto* c = dynamic_cast<IntCtx*>(&ctx);
+            if (!c)
+                return nullptr;
+            return std::make_unique<SetVarCommand>(*c->var, SetVarCommand::parseTo(data));
+        });
+
+    int a = 0;
+    IntCtx ctxA(&a);
+    auto cmd = factory.fromPayload(ur::Payload{"test.setvar", "{\"to\":7}"}, ctxA);
+    checkOk(cmd != nullptr, "上下文匹配: 重建成功");
+    ur::CommandStack stack;
+    stack.push(std::move(cmd));
+    checkOk(a == 7, "重建命令写入上下文指定的目标");
+
+    ur::CommandContext base;            // 基类上下文: dynamic_cast 失败
+    checkOk(factory.fromPayload(ur::Payload{"test.setvar", "{\"to\":9}"}, base) == nullptr,
+            "上下文类型不匹配: 返回 nullptr(不崩不抛)");
+    checkOk(!ur::CommandFactory::instance().contains("test.setvar"),
+            "自建实例不污染全局注册表");
+    checkOk(factory.types().size() == 1 && factory.types().front() == "test.setvar",
+            "types() 列出本实例自己的注册项");
+}
+
+// ════════════════════════════════════════════════════════════════════════
 int main()
 {
-    printf("UndoRedoDemo unit_tests —— undoredo_core 框架 14 块自检(零 Qt 依赖)\n");
+    printf("UndoRedoDemo unit_tests —— undoredo_core 框架 19 块自检(零 Qt 依赖)\n");
     printf("(每块自包含; 退出码 = 失败断言数)\n\n");
 
     t1_basic();
@@ -618,6 +809,11 @@ int main()
     t12_time_window();
     t13_context_filter();
     t14_payload();
+    t15_merge_budget();
+    t16_no_double_undo();
+    t17_session_boundary();
+    t18_setclean_notify();
+    t19_factory_context();
 
     printf("\n== 汇总: %d OK, %d FAIL ==\n", g_ok, g_fail);
     printf("== unit_tests %s ==\n", g_fail == 0 ? "PASS" : "FAIL");

@@ -33,6 +33,10 @@ bool TimeWindowMergePolicy::canMerge(const Command* top, const Command* incoming
 {
     if (!mergeCompatible(top, incoming))
         return false;
+    // 命令自述"我的 tag 里已有会话边界"（手势号/笔画号）→ 时间窗不再参与：
+    // 边界更硬的那个说了算。松手后 gestureId 递增、tag 变化，合并照样断开。
+    if (incoming->mergeTagHasSession())
+        return true;
     if (windowMs_ <= 0)
         return false;   // 窗口<=0 视为关闭时间维度 → 退化为不合并
     return (nowMs - lastPushMs) <= windowMs_;

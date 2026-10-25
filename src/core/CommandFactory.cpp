@@ -16,6 +16,16 @@ void CommandFactory::registerType(const std::string& type, Creator creator)
         creators_[type] = std::move(creator);
 }
 
+bool CommandFactory::unregisterType(const std::string& type)
+{
+    return creators_.erase(type) > 0;
+}
+
+void CommandFactory::clear()
+{
+    creators_.clear();
+}
+
 bool CommandFactory::contains(const std::string& type) const
 {
     return creators_.find(type) != creators_.end();
@@ -31,14 +41,15 @@ std::vector<std::string> CommandFactory::types() const
     return list;
 }
 
-std::unique_ptr<Command> CommandFactory::fromPayload(const Payload& p) const
+std::unique_ptr<Command> CommandFactory::fromPayload(const Payload& p,
+                                                     CommandContext& ctx) const
 {
     if (p.type.empty())
         return nullptr;
     auto it = creators_.find(p.type);
     if (it == creators_.end())
         return nullptr;
-    return it->second(p.data);
+    return it->second(p.data, ctx);
 }
 
 Payload CommandFactory::toPayloadDoc(const Command& cmd)

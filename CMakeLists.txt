@@ -19,13 +19,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # --- 1. 定位 Qt5（5.15.2 / msvc2019_64），换机器只改这一行 ---
 # 只有 demo 目标需要 Qt；Widgets 会传递依赖 Core/Gui，显式只列 Widgets
 # 正是"core/tests 不碰 Qt"的声明式表达。
-if(NOT DEFINED CMAKE_PREFIX_PATH OR CMAKE_PREFIX_PATH STREQUAL "")
-    set(CMAKE_PREFIX_PATH "D:/Qt/5.15.2/msvc2019_64")
+# ★ UR_BUILD_DEMO=OFF 时根本不 find_package(Qt5)：纯 core/单元测试可以在
+#   完全没装 Qt 的机器（或 CI 容器）上配置+构建通过——"core 零依赖"从
+#   编译期承诺升级为构建系统承诺（此前 find_package 是 REQUIRED 全局的，
+#   没 Qt 连 unit_tests 都配不出来）。
+option(UR_BUILD_DEMO "Build the Qt5 Widgets canvas demo (needs Qt5)" ON)
+if(UR_BUILD_DEMO)
+    if(NOT DEFINED CMAKE_PREFIX_PATH OR CMAKE_PREFIX_PATH STREQUAL "")
+        set(CMAKE_PREFIX_PATH "D:/Qt/5.15.2/msvc2019_64")
+    endif()
+    find_package(Qt5 REQUIRED COMPONENTS Widgets)
 endif()
-find_package(Qt5 REQUIRED COMPONENTS Widgets)
 
-# --- 2. 自动处理 Q_OBJECT ---
-set(CMAKE_AUTOMOC ON)
+# --- 2. 自动处理 Q_OBJECT（仅 demo 有 Q_OBJECT；core/tests 空转无害）---
+if(UR_BUILD_DEMO)
+    set(CMAKE_AUTOMOC ON)
+endif()
 
 # --- 3. 输出目录（MSVC 多配置生成器实际产物在 bin/Debug、bin/Release）---
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -59,6 +68,7 @@ target_link_libraries(unit_tests PRIVATE undoredo_core)
 # --- 5b. 画布 demo（GUI；故意不加 WIN32：--selftest 的输出留在控制台）---
 # ★ 带 Q_OBJECT 的头全部显式列出（AUTOMOC 只扫源列表内文件及其同名头，
 #   漏列 → 链接缺 metaObject，NavTreeGroup 已踩过；StackBridge.h 同理）
+if(UR_BUILD_DEMO)
 add_executable(undoredo_demo
     src/app/main.cpp
     src/app/MainWindow.h
@@ -89,6 +99,7 @@ add_executable(undoredo_demo
     src/commands/StructureCommands.cpp
 )
 target_link_libraries(undoredo_demo PRIVATE undoredo_core Qt5::Widgets)
+endif()   # UR_BUILD_DEMO
 
 # --- 6. MSVC 编译选项（豁免逐条附理由，不整体静音；故意不加 /WX）---
 if(MSVC)
@@ -98,7 +109,10 @@ if(MSVC)
     #    → ★ ─ │ 这些 GBK 表示不了的字符会截断错位 MSVC 的格式串分析 →
     #    C4474「参数太多」。屏蔽 C4474 = 参数检查失效，代价真实，
     #    所以改格式串，而不是 /wd4474。（装饰符号只准出现在注释/正文文本里）
-    set(UR_TARGETS undoredo_core unit_tests undoredo_demo)
+    set(UR_TARGETS undoredo_core unit_tests)
+    if(UR_BUILD_DEMO)
+        list(APPEND UR_TARGETS undoredo_demo)
+    endif()
 
     # 4127: conditional expression is constant —— Q_UNUSED/constexpr 判断必然触发
     # 4514: unreferenced inline function removed —— 头文件 inline 未用到，无害
