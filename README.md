@@ -57,7 +57,7 @@ docs/          设计精讲.md: 十四章(调研对照/机制走读/踩坑记录
 ## 验证基线（2026-10-25，选择性撤销语义修复后复测）
 
 - Debug + Release 双配置三目标构建：**0 error / 0 warning**
-- `unit_tests`：**136 OK / 0 FAIL**，退出码 0（双配置；已不链任何 Qt）
+- `unit_tests`：**139 OK / 0 FAIL**，退出码 0（双配置；已不链任何 Qt）
 - `undoredo_demo --selftest`：**44 OK / 0 FAIL**，退出码 0（双配置）
 - `-DUR_BUILD_DEMO=OFF`：只构建 core + 单测并跑通（Qt 环境缺失时也能用）
 - GUI 冒烟：窗口正常启动运行；**有选中项时关窗也干净退出**（见设计精讲 §13.9）

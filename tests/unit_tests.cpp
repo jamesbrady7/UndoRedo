@@ -828,6 +828,13 @@ static void t20_history_rows_are_states()
         checkOk(stack.index() == j, "游标 == 行号");
     }
 
+    // clean 检查点：移除一条会改变"当前状态"；若检查点包含这条的效果，
+    // 那个状态已不可达 → 必须 dirty（旧实现把 cleanIndex_ 左移会误报 clean）
+    stack.setClean();
+    checkOk(stack.isClean(), "setClean 落在当前状态");
+    checkOk(stack.undoIn(ctxCanvas), "undoIn(canvas) 移除 x=16");
+    checkOk(!stack.isClean(), "检查点状态包含被移除的步骤 -> 不再是 clean");
+
     // 有 redo 段时：undoIn 是"改历史"，原来的未来（redo 段）一并作废
     // ——与 push 同规则。不截断的话，redo 段里同通道命令的基线快照是按
     // "包含被移除那条"的状态捕获的，以后重做必然算错。

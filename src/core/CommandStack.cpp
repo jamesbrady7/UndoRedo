@@ -208,10 +208,8 @@ bool CommandStack::undoIn(const ContextSet& ctx)
     totalBytes_ -= entries_[size_t(k)].bytes;
     cmds_.erase(cmds_.begin() + k);
     entries_.erase(entries_.begin() + k);
-    if (cleanIndex_ == k)
-        cleanIndex_ = -1;               // 检查点包含这一步，那个状态已不存在
-    else if (cleanIndex_ > k)
-        --cleanIndex_;
+    if (cleanIndex_ >= k)
+        cleanIndex_ = -1;               // 检查点包含 k 的效果 → 那个状态已不可达
     index_ = int(cmds_.size());         // 剩余命令全部已执行（redo 段已被截断）
 
     applySelection(selNow);             // 选择集保持用户眼前的样子
